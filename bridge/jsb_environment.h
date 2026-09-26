@@ -159,6 +159,21 @@ namespace jsb
         ObjectDB object_db_;
         HashSet<void*> persistent_objects_;
 
+#if JSB_WITH_JAVASCRIPTCORE
+        // RefCounted objects unbound by unbind_collected_binding() whose binding still owes them one `unreference`.
+        // It can't be paid on the spot: unbind_collected_binding() runs from reference_object(), i.e. from inside
+        // RefCounted::reference() with Object::_instance_binding_mutex held, and RefCounted::unreference() takes that
+        // mutex again. Paid by _release_pending_unreferences() at the next update()/dispose(), or by bind_godot_object()
+        // just before the object is bound again (so the refcount is not mistaken for an external one). The pending
+        // refcount keeps the object alive until then, so the pointers stay valid; free_object(None) drops an entry if
+        // Godot deletes the object outright in the meantime.
+        Mutex pending_unreference_mutex_;
+        HashSet<void*> pending_unreference_;
+
+        void _release_pending_unreference(void* p_pointer);
+        void _release_pending_unreferences();
+#endif
+
         internal::VariantAllocator variant_allocator_;
 
         // module_id => loader
@@ -503,11 +518,11 @@ namespace jsb
         bool reference_object(void* p_pointer, bool p_is_inc);
 
 #if JSB_WITH_JAVASCRIPTCORE
-        // Make sure no collected-but-not-yet-finalized binding of `p_object` is left in the ObjectDB, so that it can be
-        // bound to a new JS object (see TypeConvert::gd_obj_to_js). If such a binding exists it is finalized right away,
-        // as its queued finalizer would have done; that queued finalizer is disarmed in the process (v8::Global::Reset).
-        // Returns false only if the binding could not be released because its refcount is the last one keeping the object alive.
-        bool release_collected_binding(Object* p_object);
+        // If `p_pointer` (a Godot object) still has a binding whose JS wrapper JSC has collected but whose queued finalizer
+        // has not run yet, unbind it now so the object can be bound to a new JS object (TypeConvert::gd_obj_to_js), and
+        // disarm that queued finalizer in the process (v8::Global::Reset). The refcount the binding owned is given back
+        // later, see pending_unreference_. Returns true if there was such a binding.
+        bool unbind_collected_binding(void* p_pointer);
 #endif
         void mark_as_persistent_object(void* p_pointer);
 

@@ -511,6 +511,8 @@ namespace jsb
         _on_gc_request();
 
 #if JSB_WITH_JAVASCRIPTCORE
+        _release_pending_unreferences();
+
         // JSC finalizers are queued and only run from update() (Isolate::PerformMicrotaskCheckpoint). Run the ones already
         // queued before the forced cleanup below, so the wrappers JSC has collected release their bindings and valuetypes
         // the regular way. `is_disposing()` is set, object callbacks only reset their handle here; the loop below finalizes
@@ -573,6 +575,10 @@ namespace jsb
 #endif
 
         exec_async_calls();
+
+#if JSB_WITH_JAVASCRIPTCORE
+        _release_pending_unreferences();
+#endif
 
         // quickjs delayed the free op after all HandleScope left, we need to swap the free op list manually explicitly.
         // otherwise, object may leak until next evacuation of HandleScope.
@@ -856,6 +862,17 @@ namespace jsb
         if (p_pointer->is_ref_counted())
         {
             RefCounted* ref_counted = (RefCounted*) p_pointer;
+#if JSB_WITH_JAVASCRIPTCORE
+            // A previous, collected binding of this object may still owe it one `unreference` (pending_unreference_).
+            // Pay it before counting external references below, otherwise it would be mistaken for one and keep the new
+            // wrapper strong for good. Unless it is the last refcount: the object would die under the caller, so leave it
+            // pending; released at the next update(), it is reported as a 2->1 transition through reference_callback and
+            // makes the new wrapper weak the regular way.
+            if (ref_counted->get_reference_count() > 1)
+            {
+                _release_pending_unreference(p_pointer);
+            }
+#endif
             if (!ref_counted->init_ref())
             {
                 JSB_LOG(Error, "can not bind a dead object %d", (uintptr_t) p_pointer);
@@ -953,21 +970,21 @@ namespace jsb
 #if JSB_WITH_JAVASCRIPTCORE
                     // The JS wrapper is collected but its finalizer is still queued (JSC sweeps lazily and the isolate defers
                     // the callback to the next PerformMicrotaskCheckpoint). Godot kept the object alive in the meantime
-                    // (a Resource in ResourceCache, an ObjectDB lookup, ...) and is taking a reference to it right now,
-                    // so it survives the `unreference` below: finalize the dead binding here, exactly as the queued callback
-                    // would have. Godot's own refcount carries the object from here on, and the next gd_obj_to_js() binds a
-                    // fresh JS object. The queued callback is disarmed while free_object resets the handle (v8::Global::Reset),
-                    // so it can never run against that fresh binding.
-                    object_handle = nullptr; // release the ObjectDB lock, free_object takes it again
-                    JSB_LOG(Verbose, "finalizing the collected binding of %d on re-reference", (uintptr_t) p_pointer);
-                    free_object(p_pointer, FinalizationType::Default);
-                    return false;
-#else
+                    // (a Resource in ResourceCache, an ObjectDB lookup, ...) and is taking a reference to it right now.
+                    // Unbind the dead binding here, so the next gd_obj_to_js() binds a fresh JS object; the queued callback
+                    // is disarmed while the handle is reset (v8::Global::Reset), so it can never run against that fresh
+                    // binding. The refcount the binding owned is released later (pending_unreference_): we are inside
+                    // RefCounted::reference(), under Object::_instance_binding_mutex, and unreference() would take it again.
+                    object_handle = nullptr; // release the ObjectDB lock first, unbind_collected_binding takes it again
+                    if (unbind_collected_binding(p_pointer))
+                    {
+                        return false;
+                    }
+#endif
                     // A first-pass GC callback may already have reset `ref_` while second-pass free
                     // is still pending. Treat this as a stale/dead binding instead of crashing.
                     JSB_LOG(Warning, "UNEXPECTED inc reference on dead value %d", (uintptr_t) p_pointer);
                     return false;
-#endif
                 }
                 object_handle->ref_.ClearWeak();
             }
@@ -993,36 +1010,70 @@ namespace jsb
     }
 
 #if JSB_WITH_JAVASCRIPTCORE
-    bool Environment::release_collected_binding(Object* p_object)
+    bool Environment::unbind_collected_binding(void* p_pointer)
     {
         check_internal_state();
         {
             // scoped: the handle (and its ObjectDB lock) must be gone before free_object below
-            const ObjectHandlePtr object_handle = object_db_.try_get_object((void*) p_object);
-            if (!object_handle)
+            const ObjectHandlePtr object_handle = object_db_.try_get_object(p_pointer);
+            if (!object_handle || object_handle->ref_count_ != 0 || !object_handle->ref_.IsEmpty())
             {
-                // nothing registered: either never bound, or reference_object() already finalized the collected binding
-                return true;
+                // not registered (never bound, or already unbound), or a live JS object exists
+                return false;
             }
-            if (!object_handle->ref_.IsEmpty())
+            // Among Godot objects only RefCounted ones that JS alone holds get weak wrappers (bind_godot_object), so a
+            // collected binding of a Godot object is always one of them. Other weak natives (Worker) are not our business.
+            if (native_classes_.get_value(object_handle->class_id).type != NativeClassType::GodotObject)
             {
-                // a live JS object exists, there is nothing to release
-                return true;
+                return false;
             }
-            jsb_check(object_handle->ref_count_ == 0);
         }
 
-        // The binding owns exactly one Godot refcount while registered, and the finalizer gives it back with `unreference`.
-        // Only non-JS-owned RefCounted objects get weak wrappers (bind_godot_object), so a collected binding is always one of
-        // them; if that refcount is the only one left, releasing it would delete the object under the caller.
-        if (p_object->is_ref_counted() && ((RefCounted*) p_object)->get_reference_count() <= 1)
+        JSB_LOG(Verbose, "unbinding the collected binding of %d", (uintptr_t) p_pointer);
+        // FinalizationType::None: remove the handle and reset its Global, which disarms the queued finalizer
+        // (v8::Global::_clear_weak_callback). The finalizer's own `unreference` is what pending_unreference_ defers.
+        free_object(p_pointer, FinalizationType::None);
         {
-            return false;
+            MutexLock lock(pending_unreference_mutex_);
+            pending_unreference_.insert(p_pointer);
         }
-
-        JSB_LOG(Verbose, "finalizing the collected binding of %d before binding it again", (uintptr_t) p_object);
-        free_object(p_object, FinalizationType::Default);
         return true;
+    }
+
+    void Environment::_release_pending_unreference(void* p_pointer)
+    {
+        {
+            MutexLock lock(pending_unreference_mutex_);
+            if (!pending_unreference_.erase(p_pointer))
+            {
+                return;
+            }
+        }
+        // what ObjectTemplate::finalizer does for a RefCounted, outside of Object::_instance_binding_mutex this time
+        RefCounted* ref_counted = (RefCounted*) p_pointer;
+        JSB_LOG(Verbose, "releasing the refcount owned by the collected binding of %d", (uintptr_t) p_pointer);
+        if (ref_counted->unreference())
+        {
+            JSB_LOG(VeryVerbose, "delete gd ref_counted object %d (collected binding)", (uintptr_t) p_pointer);
+            memdelete(ref_counted);
+        }
+    }
+
+    void Environment::_release_pending_unreferences()
+    {
+        while (true)
+        {
+            void* pointer;
+            {
+                MutexLock lock(pending_unreference_mutex_);
+                if (pending_unreference_.is_empty())
+                {
+                    return;
+                }
+                pointer = *pending_unreference_.begin();
+            }
+            _release_pending_unreference(pointer);
+        }
     }
 #endif
 
@@ -1043,6 +1094,15 @@ namespace jsb
         {
             check_internal_state();
         }
+#if JSB_WITH_JAVASCRIPTCORE
+        else
+        {
+            // Godot deleting the object outright (InstanceBindingCallbacks::free_callback, any thread): a refcount we still
+            // owed it is moot, and the pointer is about to be invalid.
+            MutexLock lock(pending_unreference_mutex_);
+            pending_unreference_.erase(p_pointer);
+        }
+#endif
         ObjectHandlePtr object_handle = object_db_.try_get_object(p_pointer);
 
         // avoid crash in the situation that `InstanceBindingCallbacks::free_callback` is called before JS object gc callback is called,

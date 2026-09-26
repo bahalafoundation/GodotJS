@@ -441,18 +441,13 @@ namespace jsb
             //   which Godot is now handing back to JS (a Resource still in ResourceCache, an ObjectDB lookup...). This
             //   only happens on JavaScriptCore: it runs finalizers lazily and the isolate defers them further, so the
             //   binding outlives its wrapper. QuickJS frees both together, V8 keeps the previous assertion.
-            //   The dead binding is finalized first (release_collected_binding), then a new JS object is constructed for
-            //   the existing script; its script-level state starts over from the class defaults, since the state lived
-            //   in the collected wrapper.
+            //   The dead binding is unbound first if reference_object() has not done so already (unbind_collected_binding),
+            //   then a new JS object is constructed for the existing script; its script-level state starts over from
+            //   the class defaults, since the state lived in the collected wrapper.
             if (!script_instance->is_shadow())
             {
 #if JSB_WITH_JAVASCRIPTCORE
-                if (!environment->release_collected_binding(p_godot_obj))
-                {
-                    JSB_LOG(Error, "can not bind %d (%s) again: its collected JS wrapper holds the last reference to it",
-                        (uintptr_t) p_godot_obj, p_godot_obj->get_class_name());
-                    return false;
-                }
+                environment->unbind_collected_binding(p_godot_obj);
                 JSB_LOG(Verbose, "constructing a new JS object for %d (%s), its previous wrapper was collected",
                     (uintptr_t) p_godot_obj, p_godot_obj->get_class_name());
 #else
