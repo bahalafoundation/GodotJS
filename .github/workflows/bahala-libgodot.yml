@@ -3,7 +3,9 @@ name: Bahala libgodot
 # Builds the engine bahalafoundation/arcade embeds and ships, and publishes it as a GitHub
 # Release that arcade's vendor.yaml pins (bahalafoundation/arcade#170):
 #
-#   libgodot-xcframework.zip       the iOS engine, GodotJS on JavaScriptCore
+#   libgodot-xcframework.zip       the iOS engine, GodotJS on JavaScriptCore: the device
+#                                  slice the app ships, and an arm64 Simulator slice
+#                                  (ad-hoc signed) its Simulator UI tests boot (arcade#177)
 #   godot-editor-macos-arm64.zip   the macOS arm64 host editor from the same tree (it
 #                                  exports the packs the engines above/below load)
 #   godot-lib-android-aar.zip      the Android engine, GodotJS on QuickJS-NG
@@ -32,10 +34,13 @@ name: Bahala libgodot
 #
 # Releases are IMMUTABLE here: arcade pins each zip by SHA-256, and a rebuild of the same
 # commits produces different bytes (the xcframework is not reproducible bit-for-bit), so
-# re-uploading would break every checkout pinned to the old ones. If the release for this
-# pair of commits exists, nothing is built. To replace one, delete it (and its tag) by
-# hand first. All three artifacts come from one run or none: a failed half publishes
-# nothing, and re-running the failed job completes the release.
+# re-uploading would break every checkout pinned to the old ones. A release is named for
+# what it was built from: the two commits and LIBGODOT_RECIPE (below), the version of
+# this recipe. If that release exists, nothing is built. A change to the recipe that
+# changes what's built bumps LIBGODOT_RECIPE, and so gets a new release rather than
+# silently mapping onto the old one; a change that doesn't (a comment, the notes) leaves
+# it alone and builds nothing. All three artifacts come from one run or none: a failed
+# half publishes nothing, and re-running the failed job completes the release.
 
 on:
   push:
@@ -60,6 +65,14 @@ env:
   # gitlink inside this commit, so this pins the Godot revision too. Must equal arcade's
   # REV: arcade's lint compares the release tag, and ci/vendor.nu the stamp, against it.
   LIBGODOT_REV: fdd3f469b5dda8eee806a02d0ab5d64667bb8552
+  # The version of this recipe, the `-r<N>` at the end of the release tag. Bump it in any
+  # commit that changes what the build produces without moving LIBGODOT_REV or the module
+  # commit, or the plan job would find the old release and build nothing. Must equal
+  # arcade's LIBGODOT_RECIPE (ci/build-libgodot.nu), whose lint compares the tag.
+  #   1  arcade#170: the first release, tagged before this suffix existed
+  #      (libgodot-fdd3f46-godotjs-fc75c05)
+  #   2  arcade#177: the xcframework gains an ios-arm64-simulator slice
+  LIBGODOT_RECIPE: 2
   # Toolchain. node/python/scons match arcade's mise.lock; pnpm is this repo's own
   # `packageManager`. Java 17 and the Android SDK come from the runner image; the NDK,
   # platform and build-tools versions are read from the libgodot tree's config.gradle.
@@ -84,7 +97,8 @@ jobs:
 
       # As bahala-host-editors.yml: the build is named after the last commit outside
       # .github/, so a commit that only touches CI files maps to the same tag, finds the
-      # release published, and builds nothing.
+      # release published, and builds nothing. Plus the recipe version, so one that
+      # changes what's built (and bumps LIBGODOT_RECIPE) maps to a new tag and builds.
       - name: Resolve the module revision and release tag
         id: plan
         env:
@@ -93,7 +107,7 @@ jobs:
           set -euo pipefail
           rev=$(git log -1 --format=%H HEAD -- . ':(exclude).github')
           git diff --quiet "$rev" HEAD -- . ':(exclude).github'
-          tag="libgodot-${LIBGODOT_REV:0:7}-godotjs-${rev:0:7}"
+          tag="libgodot-${LIBGODOT_REV:0:7}-godotjs-${rev:0:7}-r${LIBGODOT_RECIPE}"
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exists=true; else exists=false; fi
           # Only `bahala` publishes. A dispatch on any other branch builds and checks
           # without releasing, which is how to try a change to this workflow.
@@ -185,15 +199,27 @@ jobs:
         run: |
           set -euo pipefail
           # arcade's link-javascriptcore: xcodebuild layers this file over every target it
-          # builds, the one hook onto the framework project's link line.
+          # builds, the one hook onto the framework project's link line. And arcade's
+          # simulator-arm64-only (#177): the Simulator build of the framework wrapper
+          # would otherwise add an empty x86_64 stub and name the slice
+          # ios-arm64_x86_64-simulator; conditioned on the Simulator SDK, so the device
+          # build's settings are untouched.
           # shellcheck disable=SC2016 # $(inherited) is xcconfig syntax, written literally
-          printf '// arcade ci/build-libgodot.nu - GodotJS JavaScriptCore backend (#44).\nOTHER_LDFLAGS = $(inherited) -framework JavaScriptCore\n' > "$RUNNER_TEMP/godotjs.xcconfig"
+          printf '// arcade ci/build-libgodot.nu - GodotJS JavaScriptCore backend (#44).\nOTHER_LDFLAGS = $(inherited) -framework JavaScriptCore\n// #177: the Simulator slice is arm64 only.\nARCHS[sdk=iphonesimulator*] = arm64\n' > "$RUNNER_TEMP/godotjs.xcconfig"
           echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/godotjs.xcconfig" >> "$GITHUB_ENV"
           scons p=macos target=editor dev_build=yes vulkan=no metal=yes "-j$(sysctl -n hw.logicalcpu)"
 
       # Without --update-api on purpose: it would force the default (Vulkan) host rebuild.
       # build_libgodot.sh dumps extension_api.json from the editor above instead. Apple's
       # tools first on PATH: these scripts are written for macOS's BSD userland.
+      #
+      # The second build_libgodot.sh pass is the Simulator's library (arcade#177), and
+      # without --no-sim the xcframework wraps it as ios-arm64-simulator next to the
+      # device's ios-arm64. The app never ships that slice (Xcode embeds only the one
+      # matching the destination); it is what lets arcade boot the city on a Simulator.
+      # Ad-hoc signed, as arcade's sign-simulator-slice does: the app's Simulator builds
+      # are unsigned, so nothing else signs it, and the Simulator's dyld refuses to load
+      # an unsigned library (spike #176's first launch died on exactly that).
       - name: "Apple: iOS library and xcframework"
         if: matrix.part == 'apple'
         working-directory: libgodot
@@ -201,7 +227,12 @@ jobs:
           set -euo pipefail
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
           ./build_libgodot.sh --target ios
-          ./build_libgodot_xcframework.sh --target template_debug --no-sim
+          ./build_libgodot.sh --target ios --simulator
+          ./build_libgodot_xcframework.sh --target template_debug
+          sim=build/libgodot/debug/libgodot.xcframework/ios-arm64-simulator/libgodot.framework
+          test -d "$sim" || { echo "no ios-arm64-simulator slice: found $(ls build/libgodot/debug/libgodot.xcframework)"; exit 1; }
+          codesign --force --sign - "$sim"
+          echo "signed $sim ad hoc"
 
       # arcade's stage-artefacts and assert-jsc-only, then the notices and the stamp.
       - name: "Apple: stage, check and package"
@@ -218,9 +249,21 @@ jobs:
           mkdir -p "$editor/licenses" dist
           cp "$src/godot/bin/godot.macos.editor.dev.arm64" "$editor/godot-editor"
 
+          # Exactly the two slices arcade expects (its assert-xcframework-slices), read from
+          # the xcframework's own Info.plist, the list Xcode resolves a destination against.
+          slices=$(plutil -extract AvailableLibraries json -o - "$xcf/Info.plist" | python3 -c 'import json,sys; print(" ".join(sorted(l["LibraryIdentifier"] for l in json.load(sys.stdin))))')
+          [ "$slices" = "ios-arm64 ios-arm64-simulator" ] || { echo "xcframework slices: '$slices', expected 'ios-arm64 ios-arm64-simulator'"; exit 1; }
+          echo "libgodot.xcframework: slices $slices"
+          sim="$xcf/ios-arm64-simulator/libgodot.framework"
+          codesign --verify "$sim"
+          codesign -dv "$sim" 2>&1 | grep -q '^Signature=adhoc$' || { echo "$sim is not ad-hoc signed"; exit 1; }
+          lipo -archs "$sim/libgodot" | grep -qx arm64 || { echo "$sim/libgodot is not arm64 only: $(lipo -archs "$sim/libgodot")"; exit 1; }
+          echo "ios-arm64-simulator: arm64 only, ad-hoc signed"
+
           # JavaScriptCore and nothing else (arcade#44): its sources' paths are baked into
-          # the binary, QuickJS's and V8's names are wherever they are linked in.
-          for b in "$editor/godot-editor" "$xcf/ios-arm64/libgodot.framework/libgodot"; do
+          # the binary, QuickJS's and V8's names are wherever they are linked in. The
+          # Simulator slice is its own scons build, so it gets its own check.
+          for b in "$editor/godot-editor" "$xcf/ios-arm64/libgodot.framework/libgodot" "$sim/libgodot"; do
             s=$(strings "$b")
             grep -q 'impl/jsc/' <<<"$s" || { echo "$b was not built with GodotJS's JavaScriptCore backend"; exit 1; }
             if grep -qiE 'quickjs|v8_monolith|v8::internal' <<<"$s"; then echo "$b links a JavaScript engine other than JavaScriptCore"; exit 1; fi
@@ -256,7 +299,8 @@ jobs:
           beside it travel with the binaries. Nothing proprietary to Bahala is in them.
 
           Artifacts this notice covers
-            libgodot-xcframework       the embeddable engine for iOS (GodotJS on JavaScriptCore)
+            libgodot-xcframework       the embeddable engine for iOS (GodotJS on JavaScriptCore),
+                                       device and Simulator slices
             godot-editor-macos-arm64   the macOS arm64 host editor from the same build
             godot-lib-android-aar      the embeddable engine for Android (GodotJS on QuickJS-NG)
 
@@ -423,6 +467,8 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| libgodot | migeran/libgodot@\`$LIBGODOT_REV\` (Godot 4.5.1) |"
+            echo "| Recipe | $LIBGODOT_RECIPE (the tag's \`-r$LIBGODOT_RECIPE\`; see LIBGODOT_RECIPE in bahala-libgodot.yml) |"
+            echo "| xcframework | \`ios-arm64\` (device, what ships) + \`ios-arm64-simulator\` (arm64, ad-hoc signed, arcade#177) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
             echo "| Backends | JavaScriptCore (iOS xcframework, macOS editor); QuickJS-NG (Android .aar) |"
             echo "| Toolchain | $(head -1 xcode-version.txt) ($(tail -1 xcode-version.txt)), SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION, JDK 17 |"
@@ -484,7 +530,7 @@ jobs:
           cd dist
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Engine: libgodot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7}" \
+            --title "Engine: libgodot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7} (recipe ${LIBGODOT_RECIPE})" \
             --notes-file notes.md \
             --latest=false \
             libgodot-xcframework.zip godot-editor-macos-arm64.zip godot-lib-android-aar.zip \

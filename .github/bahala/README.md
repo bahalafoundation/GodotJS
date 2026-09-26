@@ -31,15 +31,20 @@ GodotJS fork". What follows are the rules for working in this repository.
   - `bahala-host-editors.yml` publishes the Linux and Windows host editors
     (vanilla Godot + GodotJS on QuickJS-NG) as `editor-godot-<7>-godotjs-<7>`.
   - `bahala-libgodot.yml` publishes the engine Arcade ships (the
-    migeran/libgodot fork + GodotJS): the iOS xcframework and macOS editor on
-    JavaScriptCore, and the Android `.aar` on QuickJS-NG, as
-    `libgodot-<7>-godotjs-<7>`. It runs on the hosted `xcode-27` runner; if
-    that preview label breaks, dispatch it with `runner=macos-26`.
+    migeran/libgodot fork + GodotJS): the iOS xcframework (device and arm64
+    Simulator slices) and macOS editor on JavaScriptCore, and the Android
+    `.aar` on QuickJS-NG, as `libgodot-<7>-godotjs-<7>-r<recipe>`. It runs on
+    the hosted `xcode-27` runner; if that preview label breaks, dispatch it
+    with `runner=macos-26`.
 - **Releases are never overwritten.** Both workflows name a release after the
   last commit outside `.github/`, and build nothing if it already exists. The
   tag itself points at the commit the run built (identical outside
   `.github/`): `GITHUB_TOKEN` may not create a tag on a tree whose workflow
   files the default branch doesn't have. So a
-  commit like this one, which only touches `.github/`, builds nothing. To
-  replace a release, delete it and its tag by hand first; Arcade pins every
-  zip by SHA-256.
+  commit like this one, which only touches `.github/`, builds nothing.
+  `bahala-libgodot.yml`'s tag also ends in `-r<LIBGODOT_RECIPE>`, the version
+  of its recipe: a `.github/` commit that changes what that workflow builds
+  bumps it (and Arcade's `LIBGODOT_RECIPE` to match), so it gets a new release
+  instead of mapping onto the old one. Arcade pins every zip by SHA-256, so
+  don't delete a release Arcade has pinned; a release nothing pins can be
+  deleted with its tag by hand to rebuild it.
