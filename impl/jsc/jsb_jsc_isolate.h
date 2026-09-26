@@ -320,6 +320,10 @@ namespace v8
 
         void _release();
 
+        // run (and delete) the finalizers queued by _BridgeInstance_finalizer. does not touch any JSValue, so it is
+        // also safe after the context/runtime are released (see _release)
+        void _drain_pending_finalizers();
+
         // push value to the top of stack (without ref-counting)
         uint16_t emplace_(JSValueRef value)
         {

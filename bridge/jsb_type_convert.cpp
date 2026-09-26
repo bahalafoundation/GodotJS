@@ -433,9 +433,32 @@ namespace jsb
         {
             GodotJSScriptInstanceBase* script_instance = (GodotJSScriptInstanceBase*) si;
 
-            // If the script_instance is NOT a shadow instance, then we're trying to access a GodotJS scripted object
-            // from another thread than the one that owns it. That's not permitted.
-            jsb_check(script_instance->is_shadow());
+            // Two kinds of GodotJS script instance can exist without a JS object here:
+            // - a shadow instance: the object was instantiated by a thread that does not own the Environment (async resource
+            //   loading), and only its property state has been collected so far. Constructing the real instance below
+            //   displaces the shadow (bind_godot_object).
+            // - a regular instance whose JS wrapper has been garbage collected while the Godot object stayed alive, and
+            //   which Godot is now handing back to JS (a Resource still in ResourceCache, an ObjectDB lookup...). This
+            //   only happens on JavaScriptCore: it runs finalizers lazily and the isolate defers them further, so the
+            //   binding outlives its wrapper. QuickJS frees both together, V8 keeps the previous assertion.
+            //   The dead binding is finalized first (release_collected_binding), then a new JS object is constructed for
+            //   the existing script; its script-level state starts over from the class defaults, since the state lived
+            //   in the collected wrapper.
+            if (!script_instance->is_shadow())
+            {
+#if JSB_WITH_JAVASCRIPTCORE
+                if (!environment->release_collected_binding(p_godot_obj))
+                {
+                    JSB_LOG(Error, "can not bind %d (%s) again: its collected JS wrapper holds the last reference to it",
+                        (uintptr_t) p_godot_obj, p_godot_obj->get_class_name());
+                    return false;
+                }
+                JSB_LOG(Verbose, "constructing a new JS object for %d (%s), its previous wrapper was collected",
+                    (uintptr_t) p_godot_obj, p_godot_obj->get_class_name());
+#else
+                jsb_checkf(false, "a GodotJS scripted object %d (%s) has no JS object", (uintptr_t) p_godot_obj, p_godot_obj->get_class_name());
+#endif
+            }
 
             Ref<GodotJSScript> script = script_instance->get_script();
             ScriptInstance* non_shadow_instance = script->instance_construct(p_godot_obj, false);

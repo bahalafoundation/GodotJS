@@ -501,6 +501,14 @@ namespace jsb
 
         // return true if operation is successful
         bool reference_object(void* p_pointer, bool p_is_inc);
+
+#if JSB_WITH_JAVASCRIPTCORE
+        // Make sure no collected-but-not-yet-finalized binding of `p_object` is left in the ObjectDB, so that it can be
+        // bound to a new JS object (see TypeConvert::gd_obj_to_js). If such a binding exists it is finalized right away,
+        // as its queued finalizer would have done; that queued finalizer is disarmed in the process (v8::Global::Reset).
+        // Returns false only if the binding could not be released because its refcount is the last one keeping the object alive.
+        bool release_collected_binding(Object* p_object);
+#endif
         void mark_as_persistent_object(void* p_pointer);
 
         // request a full garbage collection

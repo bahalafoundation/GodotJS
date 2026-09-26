@@ -15,6 +15,13 @@ namespace jsb::impl
     public:
         static void SetWeak(v8::Isolate* isolate, JSObjectRef value, void* parameter, void* callback);
 
+        // the InternalData of a bridge instance (JSObjectGetPrivate), nullptr for any other JS object
+        static void* GetInternalData(JSObjectRef value);
+
+        // clear the weak callback stored in an InternalData obtained from GetInternalData().
+        // unlike SetWeak(isolate, obj, nullptr, nullptr) this works after the JS object is collected (see v8::Global::_clear_weak_callback)
+        static void ClearWeakCallback(void* internal_data);
+
         static JSContextGroupRef rt(v8::Isolate* isolate);
         static JSContextRef ctx(v8::Isolate* isolate);
 

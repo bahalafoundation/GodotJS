@@ -147,7 +147,32 @@ namespace v8
             isolate_ = nullptr;
             shadow_ = nullptr;
             value_ = nullptr;
+            internal_data_ = nullptr;
             weak_type_ = WeakType::kStrong;
+        }
+
+        // Disarm the weak callback registered by SetWeak(parameter, callback), whether or not the JS object is still alive.
+        //
+        // JSC only tells us about a dead object through the class finalizer, which runs lazily (sweep time, any thread) and
+        // which the isolate merely queues into `pending_finalize_`. Between the collection and that queued callback running,
+        // `shadow_` already reads null, so the object can't be reached through JSObjectGetPrivate any more; the InternalData
+        // carrying the callback is still alive though (it is only deleted after the queued callback ran). Going through the
+        // pointer we saved in SetWeak() lets Reset() cancel the callback in that window, which is what makes it safe to bind
+        // the same native pointer to a fresh JS object: the stale callback will not run against the new binding.
+        //
+        // Invariant relied upon: an InternalData outlives every Global that points at it in kWeakCallback state. The isolate
+        // deletes it right after running its callback, and every callback registered through a Global resets that Global
+        // (or the Global was moved out and reset earlier, see Environment::free_object), clearing `internal_data_` here.
+        void _clear_weak_callback()
+        {
+            if (weak_type_ == WeakType::kWeakCallback)
+            {
+                jsb::impl::Broker::ClearWeakCallback(internal_data_);
+                internal_data_ = nullptr;
+                return;
+            }
+            // kWeak: nothing was registered by this handle, keep the previous behaviour (a no-op once the object is dead)
+            jsb::impl::Broker::SetWeak(isolate_, JSWeakGetObject(shadow_), nullptr, nullptr);
         }
 
     public:
@@ -165,6 +190,7 @@ namespace v8
             weak_type_ = other.weak_type_;
             shadow_ = other.shadow_;
             value_ = other.value_;
+            internal_data_ = other.internal_data_;
             other._clear();
         }
 
@@ -180,6 +206,7 @@ namespace v8
                     weak_type_ = other.weak_type_;
                     shadow_ = other.shadow_;
                     value_ = other.value_;
+                    internal_data_ = other.internal_data_;
                     other._clear();
                 }
             }
@@ -203,9 +230,9 @@ namespace v8
             case WeakType::kWeak:
             case WeakType::kWeakCallback:
                 {
-                    // clear callback
+                    // clear callback (also when the object is already collected, see _clear_weak_callback)
                     const JSContextGroupRef rt = jsb::impl::Broker::rt(isolate_);
-                    jsb::impl::Broker::SetWeak(isolate_, JSWeakGetObject(shadow_), nullptr, nullptr);
+                    _clear_weak_callback();
                     JSWeakRelease(rt, shadow_);
                     shadow_ = nullptr;
                     break;
@@ -252,8 +279,7 @@ namespace v8
             if (weak_type_ == WeakType::kWeakCallback)
             {
                 // clear callback
-                const JSObjectRef obj = jsb::impl::JavaScriptCore::AsObject(ctx, value_);
-                jsb::impl::Broker::SetWeak(isolate_, obj, nullptr, nullptr);
+                _clear_weak_callback();
             }
 
             weak_type_ = WeakType::kStrong;
@@ -289,6 +315,8 @@ namespace v8
             weak_type_ = WeakType::kWeakCallback;
             const JSObjectRef obj = jsb::impl::JavaScriptCore::AsObject(ctx, value_);
             shadow_ = JSWeakCreate(rt, obj);
+            // remember where the callback lives so Reset() can disarm it after `obj` is collected (see _clear_weak_callback)
+            internal_data_ = jsb::impl::Broker::GetInternalData(obj);
             jsb::impl::Broker::SetWeak(isolate_, obj, parameter, (void*) callback);
             JSValueUnprotect(ctx, value_);
             value_ = nullptr;
@@ -348,6 +376,10 @@ namespace v8
 
         // value_ is not protected if this handle is weak, check is_alive() before accessing value_
         JSValueRef value_ = nullptr;
+
+        // only used for kWeakCallback: the InternalData (JSObjectGetPrivate of the object) holding the registered callback.
+        // Valid until _clear_weak_callback(), even after the object itself is collected (see the invariant there).
+        void* internal_data_ = nullptr;
 
         WeakType weak_type_ = WeakType::kStrong;
     };

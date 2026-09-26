@@ -25,6 +25,21 @@ namespace jsb::impl
         }
     }
 
+    void* Broker::GetInternalData(JSObjectRef value)
+    {
+        return value ? JSObjectGetPrivate(value) : nullptr;
+    }
+
+    void Broker::ClearWeakCallback(void* internal_data)
+    {
+        if (jsb::impl::InternalData* data = (jsb::impl::InternalData*) internal_data)
+        {
+            JSB_JSC_LOG(VeryVerbose, "clear weak callback id:%s pc:%s,%s", (uintptr_t) data, (uintptr_t) data->weak.parameter, (uintptr_t) data->weak.callback);
+            data->weak.parameter = nullptr;
+            data->weak.callback = nullptr;
+        }
+    }
+
     JSValueRef Broker::stack_val(v8::Isolate* isolate, uint16_t index)
     {
         return isolate->stack_val(index);

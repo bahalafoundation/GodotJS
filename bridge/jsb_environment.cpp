@@ -510,6 +510,14 @@ namespace jsb
         exec_async_calls();
         _on_gc_request();
 
+#if JSB_WITH_JAVASCRIPTCORE
+        // JSC finalizers are queued and only run from update() (Isolate::PerformMicrotaskCheckpoint). Run the ones already
+        // queued before the forced cleanup below, so the wrappers JSC has collected release their bindings and valuetypes
+        // the regular way. `is_disposing()` is set, object callbacks only reset their handle here; the loop below finalizes
+        // every object that is still registered.
+        isolate_->PerformMicrotaskCheckpoint();
+#endif
+
         // Cleanup all objects by forcibly invoke all callbacks not invoked by v8.
         JSB_LOG(Verbose, "cleanup %d objects", object_db_.size());
         while (void* pointer = object_db_.try_get_first_pointer())
@@ -925,7 +933,7 @@ namespace jsb
     bool Environment::reference_object(void* p_pointer, bool p_is_inc)
     {
         check_internal_state();
-        const ObjectHandlePtr object_handle = object_db_.try_get_object(p_pointer);
+        ObjectHandlePtr object_handle = object_db_.try_get_object(p_pointer);
         if (jsb_unlikely(!object_handle))
         {
             JSB_LOG(Verbose, "UNEXPECTED bad pointer %d", (uintptr_t) p_pointer);
@@ -940,12 +948,26 @@ namespace jsb
         {
             if (object_handle->ref_count_ == 0)
             {
-                // A first-pass GC callback may already have reset `ref_` while second-pass free
-                // is still pending. Treat this as a stale/dead binding instead of crashing.
                 if (jsb_unlikely(object_handle->ref_.IsEmpty()))
                 {
+#if JSB_WITH_JAVASCRIPTCORE
+                    // The JS wrapper is collected but its finalizer is still queued (JSC sweeps lazily and the isolate defers
+                    // the callback to the next PerformMicrotaskCheckpoint). Godot kept the object alive in the meantime
+                    // (a Resource in ResourceCache, an ObjectDB lookup, ...) and is taking a reference to it right now,
+                    // so it survives the `unreference` below: finalize the dead binding here, exactly as the queued callback
+                    // would have. Godot's own refcount carries the object from here on, and the next gd_obj_to_js() binds a
+                    // fresh JS object. The queued callback is disarmed while free_object resets the handle (v8::Global::Reset),
+                    // so it can never run against that fresh binding.
+                    object_handle = nullptr; // release the ObjectDB lock, free_object takes it again
+                    JSB_LOG(Verbose, "finalizing the collected binding of %d on re-reference", (uintptr_t) p_pointer);
+                    free_object(p_pointer, FinalizationType::Default);
+                    return false;
+#else
+                    // A first-pass GC callback may already have reset `ref_` while second-pass free
+                    // is still pending. Treat this as a stale/dead binding instead of crashing.
                     JSB_LOG(Warning, "UNEXPECTED inc reference on dead value %d", (uintptr_t) p_pointer);
                     return false;
+#endif
                 }
                 object_handle->ref_.ClearWeak();
             }
@@ -969,6 +991,40 @@ namespace jsb
         }
         return true;
     }
+
+#if JSB_WITH_JAVASCRIPTCORE
+    bool Environment::release_collected_binding(Object* p_object)
+    {
+        check_internal_state();
+        {
+            // scoped: the handle (and its ObjectDB lock) must be gone before free_object below
+            const ObjectHandlePtr object_handle = object_db_.try_get_object((void*) p_object);
+            if (!object_handle)
+            {
+                // nothing registered: either never bound, or reference_object() already finalized the collected binding
+                return true;
+            }
+            if (!object_handle->ref_.IsEmpty())
+            {
+                // a live JS object exists, there is nothing to release
+                return true;
+            }
+            jsb_check(object_handle->ref_count_ == 0);
+        }
+
+        // The binding owns exactly one Godot refcount while registered, and the finalizer gives it back with `unreference`.
+        // Only non-JS-owned RefCounted objects get weak wrappers (bind_godot_object), so a collected binding is always one of
+        // them; if that refcount is the only one left, releasing it would delete the object under the caller.
+        if (p_object->is_ref_counted() && ((RefCounted*) p_object)->get_reference_count() <= 1)
+        {
+            return false;
+        }
+
+        JSB_LOG(Verbose, "finalizing the collected binding of %d before binding it again", (uintptr_t) p_object);
+        free_object(p_object, FinalizationType::Default);
+        return true;
+    }
+#endif
 
     // jsb_force_inline static void clear_internal_field(v8::Isolate* isolate, const v8::Global<v8::Object>& p_obj)
     // {

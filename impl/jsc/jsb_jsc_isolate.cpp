@@ -194,6 +194,19 @@ function(key, value, getter, setter) {
         JSContextGroupRelease(rt_);
         rt_ = nullptr;
 
+        // JSGarbageCollect above is only a hint. Whatever was still alive got finalized while the runtime was torn down,
+        // and _BridgeInstance_finalizer only queues. Run those callbacks now (valuetype Variants are released, object bindings
+        // are no-ops since Environment::dispose already emptied the ObjectDB) instead of leaking the payloads.
+        // Loop: a callback may itself queue more (none is expected to, but it is cheap to be safe).
+        while (true)
+        {
+            {
+                MutexLock lock(pending_finalize_mutex_);
+                if (pending_finalize_.is_empty()) break;
+            }
+            _drain_pending_finalizers();
+        }
+
         memdelete(this);
     }
 
@@ -263,6 +276,11 @@ function(key, value, getter, setter) {
             captured_values_.remove_at(id);
         }
 
+        _drain_pending_finalizers();
+    }
+
+    void Isolate::_drain_pending_finalizers()
+    {
         Vector<jsb::impl::InternalData*> finalize_batch;
 
         {
@@ -282,6 +300,8 @@ function(key, value, getter, setter) {
                 continue;
             }
 
+            // `weak.callback` is null if the callback was disarmed after the object died (v8::Global::_clear_weak_callback):
+            // the native pointer it referred to is bound to another JS object by now, or released. Only the InternalData is left to free.
             if (const WeakCallbackInfo<void>::Callback callback = (WeakCallbackInfo<void>::Callback) data->weak.callback)
             {
                 const WeakCallbackInfo<void> info(this, data->weak.parameter, data->internal_fields);
