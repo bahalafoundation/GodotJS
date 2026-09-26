@@ -35,6 +35,8 @@ PLATFORMS = {
     "linuxbsd": {
         "host": "linux-x86_64",
         "bins": {"godot.linuxbsd.editor.x86_64": "godot-editor"},
+        # The one carrying the engine, which the backend check reads.
+        "engine": "godot-editor",
         # The one to run from a terminal/CI: prints to stdout, returns the exit code.
         "run": "godot-editor",
     },
@@ -44,6 +46,9 @@ PLATFORMS = {
             "godot.windows.editor.x86_64.exe": "godot-editor.exe",
             "godot.windows.editor.x86_64.console.exe": "godot-editor.console.exe",
         },
+        # The console wrapper is a small launcher with no engine in it, so only the .exe
+        # is checked, as arcade's stage-windows-artefacts does.
+        "engine": "godot-editor.exe",
         "run": "godot-editor.console.exe",
     },
 }
@@ -103,8 +108,7 @@ def stage(args: argparse.Namespace) -> None:
         if not src.exists():
             sys.exit(f"{src} was not built; scons' output naming changed?")
         shutil.copy2(src, out / staged)
-    for staged in spec["bins"].values():
-        assert_quickjs_only(out / staged)
+    assert_quickjs_only(out / spec["engine"])
 
     (out / STAMP).write_text(stamp_json(args.platform), encoding="utf-8", newline="\n")
 
