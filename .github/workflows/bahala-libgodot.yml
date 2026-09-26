@@ -472,13 +472,18 @@ jobs:
           } > notes.md
           cat notes.md
 
-      # Tagged at the module commit the engine was built from, which is what the tag names.
+      # Tagged at the commit this run built ($GITHUB_SHA), not at the module commit the tag
+      # names: the plan job proved the two identical outside .github/. GITHUB_TOKEN has no
+      # `workflows` permission, so GitHub refuses (403 "Resource not accessible by
+      # integration") a new tag whose tree carries workflow files the default branch
+      # doesn't, which an older module commit's tree can: fc75c05's carried the #170 spike.
+      # $GITHUB_SHA is `bahala`'s head at push time, so its workflows are the branch's own.
       - name: Create the release
         run: |
           set -euo pipefail
           cd dist
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
-            --target "$GODOTJS_REV" \
+            --target "$GITHUB_SHA" \
             --title "Engine: libgodot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7}" \
             --notes-file notes.md \
             --latest=false \

@@ -9,10 +9,9 @@ GodotJS fork". What follows are the rules for working in this repository.
 - **`bahala` is append-only.** Never rewrite it or force-push it. Arcade pins
   commits on this branch by SHA and checks them out of a full clone, so every
   commit it has ever pinned must stay reachable.
-- **Push to both remotes:** GitHub (`bahalafoundation/GodotJS`) and the
-  homelab copy (`oss/godotjs` on Gitea). They don't sync. Everything builds
-  on GitHub; nothing builds from the Gitea copy, and Gitea Actions is off
-  there.
+- **GitHub is the only remote.** Push to `bahalafoundation/GodotJS` and
+  nowhere else; every build and release happens here. (The homelab's Gitea
+  copy, `oss/godotjs`, was removed in arcade#170.)
 - **Keep concerns in separate commits:** the Godot 4.5.1 compat commit, fixes
   meant for upstream, Arcade's Godot patches under `bahala/`, and our tooling
   under `.github/`. A fix going upstream must not depend on any of the others.
@@ -37,7 +36,10 @@ GodotJS fork". What follows are the rules for working in this repository.
     `libgodot-<7>-godotjs-<7>`. It runs on the hosted `xcode-27` runner; if
     that preview label breaks, dispatch it with `runner=macos-26`.
 - **Releases are never overwritten.** Both workflows name a release after the
-  last commit outside `.github/`, and build nothing if it already exists. So a
+  last commit outside `.github/`, and build nothing if it already exists. The
+  tag itself points at the commit the run built (identical outside
+  `.github/`): `GITHUB_TOKEN` may not create a tag on a tree whose workflow
+  files the default branch doesn't have. So a
   commit like this one, which only touches `.github/`, builds nothing. To
   replace a release, delete it and its tag by hand first; Arcade pins every
   zip by SHA-256.
