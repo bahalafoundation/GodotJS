@@ -13,15 +13,19 @@ GodotJS fork". What follows are the rules for working in this repository.
   nowhere else; every build and release happens here. (The homelab's Gitea
   copy, `oss/godotjs`, was removed in arcade#170.)
 - **Keep concerns in separate commits:** the Godot 4.5.1 compat commit, fixes
-  meant for upstream, Arcade's Godot patches under `bahala/`, and our tooling
-  under `.github/`. A fix going upstream must not depend on any of the others.
-- **`bahala/patches/godot/`** holds the two patches Arcade's Android engine
-  needs on top of the migeran/libgodot fork's Godot (a GLES3 guard, and the
-  `getRenderView` JNI lookup). They sit outside `.github/` on purpose: a
-  change to them is a new module commit, so it gets new releases and a new pin
-  in Arcade. `bahala-libgodot.yml` and Arcade's local `just engine-build` both
-  apply them from the same checkout. There is no second copy in Arcade.
-  Nothing under `bahala/` is compiled into the module.
+  meant for upstream, and our tooling under `.github/`. A fix going upstream
+  must not depend on any of the others.
+- **Arcade's two Android fixes are commits, not patches (arcade#171).** They
+  used to live here as `.patch` files under `bahala/patches/godot/`, applied
+  at build time by `bahala-libgodot.yml` and Arcade's local `just
+  engine-build`. Both now live as ordinary commits on
+  [`bahalafoundation/godot`](https://github.com/bahalafoundation/godot)'s own
+  `bahala` branch (a fork of `migeran/godot`: a GLES3_ENABLED guard, and the
+  restored `getRenderView` JNI lookup, #72), reached through
+  [`bahalafoundation/libgodot`](https://github.com/bahalafoundation/libgodot)'s
+  (a fork of `migeran/libgodot`) `godot` gitlink. `bahala-libgodot.yml` builds
+  from `bahalafoundation/libgodot` directly; nothing here applies a patch any
+  more, and `bahala/patches/` is gone.
 - **Sync upstream by merging** `upstream/main` into `bahala`, never by
   rebasing. Mirror upstream's `main` to this fork's `main` unchanged.
 - **Only our two workflows run here.** Upstream's workflows are disabled in
@@ -31,7 +35,7 @@ GodotJS fork". What follows are the rules for working in this repository.
   - `bahala-host-editors.yml` publishes the Linux and Windows host editors
     (vanilla Godot + GodotJS on QuickJS-NG) as `editor-godot-<7>-godotjs-<7>`.
   - `bahala-libgodot.yml` publishes the engine Arcade ships (the
-    migeran/libgodot fork + GodotJS): the iOS xcframework (device and arm64
+    bahalafoundation/libgodot fork + GodotJS): the iOS xcframework (device and arm64
     Simulator slices) and macOS editor on JavaScriptCore, and the Android
     `.aar` on QuickJS-NG, as `libgodot-<7>-godotjs-<7>-r<recipe>`. It runs on
     the hosted `xcode-27` runner; if that preview label breaks, dispatch it

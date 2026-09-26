@@ -135,7 +135,7 @@ def stage(args: argparse.Namespace) -> None:
     for f in sorted(out.rglob("*")):
         print(f"  {f.relative_to(out)}")
     print(
-        "NOT the engine that ships: vanilla Godot + QuickJS-NG, not the migeran/libgodot "
+        "NOT the engine that ships: vanilla Godot + QuickJS-NG, not the bahalafoundation/libgodot "
         "fork's JavaScriptCore build. It never exports a shipping pack."
     )
 
@@ -229,7 +229,7 @@ travel with the binaries.
 
 It is a HOST EDITOR for developing Arcade's Godot projects on Linux and Windows:
 vanilla Godot plus GodotJS on the QuickJS-NG backend. It is NOT the engine Arcade
-ships (that is the migeran/libgodot fork on JavaScriptCore), and it never exports a
+ships (that is the bahalafoundation/libgodot fork on JavaScriptCore), and it never exports a
 pack that ships.
 
 Components, at the exact revisions built
