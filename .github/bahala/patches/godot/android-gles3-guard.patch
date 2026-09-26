@@ -1,0 +1,21 @@
+diff --git a/platform/android/rendering_native_surface_android.cpp b/platform/android/rendering_native_surface_android.cpp
+index 65d9fbf0ef..07e1c0e7f2 100644
+--- a/platform/android/rendering_native_surface_android.cpp
++++ b/platform/android/rendering_native_surface_android.cpp
+@@ -135,6 +135,7 @@ RenderingContextDriver *RenderingNativeSurfaceAndroid::create_rendering_context(
+ 	return nullptr;
+ }
+ 
++#if defined(GLES3_ENABLED)
+ bool GLManagerAndroid::validate_driver() const {
+ 	void *handle = dlopen("libGLESv3.so", RTLD_LOCAL);
+ 	if (handle == nullptr) {
+@@ -154,6 +155,8 @@ bool GLManagerAndroid::validate_driver() const {
+ 	return true;
+ }
+ 
++#endif // GLES3_ENABLED
++
+ 
+ GLManager *RenderingNativeSurfaceAndroid::create_gl_manager(const String &p_driver_name) {
+ #if defined(GLES3_ENABLED)
