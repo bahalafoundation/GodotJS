@@ -16,6 +16,9 @@ name: Bahala host editors
 # two honest: arcade's lint and ci/vendor.nu reject an editor whose stamp disagrees with
 # ci/build-libgodot.nu's GODOT_VANILLA_REV/GODOTJS_REV.
 #
+# Its sibling bahala-libgodot.yml publishes the engine arcade ships (the migeran/libgodot
+# fork: the iOS xcframework, the macOS editor and the Android .aar) the same way.
+#
 # Upstream's own workflows (runner.yml and the build_* it calls) are disabled on this fork
 # in the repository's Actions settings (`gh workflow disable`), not edited, so they stay
 # byte-identical to upstream. They default to V8, build every platform, and runner.yml

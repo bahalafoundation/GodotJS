@@ -1,0 +1,487 @@
+name: Bahala libgodot
+
+# Builds the engine bahalafoundation/arcade embeds and ships, and publishes it as a GitHub
+# Release that arcade's vendor.yaml pins (bahalafoundation/arcade#170):
+#
+#   libgodot-xcframework.zip       the iOS engine, GodotJS on JavaScriptCore
+#   godot-editor-macos-arm64.zip   the macOS arm64 host editor from the same tree (it
+#                                  exports the packs the engines above/below load)
+#   godot-lib-android-aar.zip      the Android engine, GodotJS on QuickJS-NG
+#
+# Sibling of bahala-host-editors.yml (#169), which publishes the Linux/Windows host editors
+# built from VANILLA Godot. This one builds the migeran/libgodot fork at LIBGODOT_REV
+# (below), with this fork dropped in as godot/modules/godotjs. It replaced arcade's Gitea
+# engine-build.yaml on macdaddy: GitHub-hosted macOS minutes are free on this public repo,
+# and it needs no credential beyond this workflow's own GITHUB_TOKEN.
+#
+# Arcade's recipe for the same build (ci/build-libgodot.nu's macOS path, `just
+# engine-build`, the local fallback) lives in the arcade repo, which is private, so it is
+# restated here rather than fetched: same scons flags, same libgodot scripts, same staged
+# names, same byte-level asserts, same stamp. The two Android patches both apply are not
+# restated: they are module files (bahala/patches/godot/), read from the same checkout by
+# both. The stamp {rev, godotjs_rev} in the editor's zip and the tag keep the two honest:
+# arcade's lint and ci/vendor.nu reject a release whose tag or stamp disagrees with
+# ci/build-libgodot.nu's REV/GODOTJS_REV.
+#
+# The runner is `xcode-27`: macOS 27 with Xcode 27.0 (27A266a), exactly what macdaddy runs
+# arcade's app builds with. It is a public-preview label; if it goes away or breaks,
+# dispatch with runner=macos-26 (GA, Xcode 26.6), which built this recipe green in
+# the #170 spike (run 36254045473, ~39 min). The Xcode a release was built with is in its
+# notes. Both are 3-vCPU M1 VMs with 7 GB RAM: the Apple half takes ~30 min there, the
+# Android half ~15 min, in parallel, and neither comes near the disk (a 12 GiB peak).
+#
+# Releases are IMMUTABLE here: arcade pins each zip by SHA-256, and a rebuild of the same
+# commits produces different bytes (the xcframework is not reproducible bit-for-bit), so
+# re-uploading would break every checkout pinned to the old ones. If the release for this
+# pair of commits exists, nothing is built. To replace one, delete it (and its tag) by
+# hand first. All three artifacts come from one run or none: a failed half publishes
+# nothing, and re-running the failed job completes the release.
+
+on:
+  push:
+    branches: [bahala]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Hosted macOS runner label (xcode-27; macos-26 is the fallback, see the header)
+        default: xcode-27
+        type: choice
+        options: [xcode-27, macos-26]
+
+concurrency:
+  group: bahala-libgodot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # migeran/libgodot at arcade's ci/build-libgodot.nu REV. Its `godot` submodule is a
+  # gitlink inside this commit, so this pins the Godot revision too. Must equal arcade's
+  # REV: arcade's lint compares the release tag, and ci/vendor.nu the stamp, against it.
+  LIBGODOT_REV: fdd3f469b5dda8eee806a02d0ab5d64667bb8552
+  # Toolchain. node/python/scons match arcade's mise.lock; pnpm is this repo's own
+  # `packageManager`. Java 17 and the Android SDK come from the runner image; the NDK,
+  # platform and build-tools versions are read from the libgodot tree's config.gradle.
+  NODE_VERSION: 22.23.2
+  PNPM_VERSION: 10.11.0
+  SCONS_VERSION: 4.11.1
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    outputs:
+      godotjs_rev: ${{ steps.plan.outputs.godotjs_rev }}
+      tag: ${{ steps.plan.outputs.tag }}
+      exists: ${{ steps.plan.outputs.exists }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # As bahala-host-editors.yml: the build is named after the last commit outside
+      # .github/, so a commit that only touches CI files maps to the same tag, finds the
+      # release published, and builds nothing.
+      - name: Resolve the module revision and release tag
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rev=$(git log -1 --format=%H HEAD -- . ':(exclude).github')
+          git diff --quiet "$rev" HEAD -- . ':(exclude).github'
+          tag="libgodot-${LIBGODOT_REV:0:7}-godotjs-${rev:0:7}"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exists=true; else exists=false; fi
+          # Only `bahala` publishes. A dispatch on any other branch builds and checks
+          # without releasing, which is how to try a change to this workflow.
+          if [ "$GITHUB_REF" = "refs/heads/bahala" ]; then publish=true; else publish=false; fi
+          {
+            echo "godotjs_rev=$rev"
+            echo "tag=$tag"
+            echo "exists=$exists"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "GodotJS module revision: $rev (HEAD is $GITHUB_SHA)"
+          echo "Release tag: $tag (exists: $exists, publish: $publish)"
+          if [ "$exists" = true ]; then
+            echo "::notice::$tag is already published; nothing to build (releases are immutable, see the header)"
+          fi
+
+  build:
+    name: Build (${{ matrix.part }})
+    needs: plan
+    if: needs.plan.outputs.exists != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two halves of one engine build, in parallel, each from its own clone of the same
+        # pinned tree (arcade's local build runs them one after the other in one tree).
+        part: [apple, android]
+    runs-on: ${{ inputs.runner || 'xcode-27' }}
+    timeout-minutes: 180
+    env:
+      GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Runner
+        run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.logicalcpu hw.memsize
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version"
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Check out GodotJS
+        uses: actions/checkout@v7
+        with:
+          path: godotjs
+          submodules: recursive
+
+      # arcade's ensure-libgodot + ensure-godotjs + write-custom-py. The module goes in as
+      # godot/modules/godotjs, lower case, as arcade lays it out (GodotJS names the
+      # directory compiled JavaScript loads from after the module's directory).
+      - name: Clone migeran/libgodot at LIBGODOT_REV and drop GodotJS in
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/migeran/libgodot.git libgodot
+          git -C libgodot checkout --quiet "$LIBGODOT_REV"
+          git -C libgodot submodule update --init --recursive
+          mv godotjs libgodot/godot/modules/godotjs
+          test -f libgodot/godot/modules/godotjs/jsb.h
+          # Every scons run in the tree reads custom.py: GodotJS on JavaScriptCore, the
+          # system framework on Apple platforms (arcade#44). The Android build overrides
+          # it with use_quickjs_ng=yes on its command line.
+          printf '# Written by bahala-libgodot.yml (arcade ci/build-libgodot.nu) - GodotJS on the JavaScriptCore backend (#44).\nuse_jsc = "yes"\n' > libgodot/godot/custom.py
+          echo "GODOT_REV=$(git -C libgodot/godot rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install SCons
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "scons==${SCONS_VERSION}"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      # GodotJS's SCsub runs `pnpm install && pnpm build` to bundle its runtime.
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ------------------------------------------------------------------ apple half ---
+
+      # Metal, not the default Vulkan build (which needs the Vulkan SDK). build_libgodot.sh
+      # below then finds this editor and skips its own host build.
+      - name: "Apple: host editor"
+        if: matrix.part == 'apple'
+        working-directory: libgodot/godot
+        run: |
+          set -euo pipefail
+          # arcade's link-javascriptcore: xcodebuild layers this file over every target it
+          # builds, the one hook onto the framework project's link line.
+          # shellcheck disable=SC2016 # $(inherited) is xcconfig syntax, written literally
+          printf '// arcade ci/build-libgodot.nu - GodotJS JavaScriptCore backend (#44).\nOTHER_LDFLAGS = $(inherited) -framework JavaScriptCore\n' > "$RUNNER_TEMP/godotjs.xcconfig"
+          echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/godotjs.xcconfig" >> "$GITHUB_ENV"
+          scons p=macos target=editor dev_build=yes vulkan=no metal=yes "-j$(sysctl -n hw.logicalcpu)"
+
+      # Without --update-api on purpose: it would force the default (Vulkan) host rebuild.
+      # build_libgodot.sh dumps extension_api.json from the editor above instead. Apple's
+      # tools first on PATH: these scripts are written for macOS's BSD userland.
+      - name: "Apple: iOS library and xcframework"
+        if: matrix.part == 'apple'
+        working-directory: libgodot
+        run: |
+          set -euo pipefail
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+          ./build_libgodot.sh --target ios
+          ./build_libgodot_xcframework.sh --target template_debug --no-sim
+
+      # arcade's stage-artefacts and assert-jsc-only, then the notices and the stamp.
+      - name: "Apple: stage, check and package"
+        if: matrix.part == 'apple'
+        run: |
+          set -euo pipefail
+          src=libgodot
+          module=$src/godot/modules/godotjs
+          if [ ! -f "$src/build/gdextension/extension_api.json" ]; then
+            echo "no extension_api.json: the libgodot build scripts changed layout?"; exit 1
+          fi
+          xcf=$src/build/libgodot/debug/libgodot.xcframework
+          editor=stage/editor
+          mkdir -p "$editor/licenses" dist
+          cp "$src/godot/bin/godot.macos.editor.dev.arm64" "$editor/godot-editor"
+
+          # JavaScriptCore and nothing else (arcade#44): its sources' paths are baked into
+          # the binary, QuickJS's and V8's names are wherever they are linked in.
+          for b in "$editor/godot-editor" "$xcf/ios-arm64/libgodot.framework/libgodot"; do
+            s=$(strings "$b")
+            grep -q 'impl/jsc/' <<<"$s" || { echo "$b was not built with GodotJS's JavaScriptCore backend"; exit 1; }
+            if grep -qiE 'quickjs|v8_monolith|v8::internal' <<<"$s"; then echo "$b links a JavaScript engine other than JavaScriptCore"; exit 1; fi
+            echo "$(basename "$b"): JavaScriptCore backend, no other JavaScript engine"
+          done
+
+          # It is the Godot we pinned: 4.5.1.stable.custom_build.<first 9 of the submodule>.
+          version=$("$editor/godot-editor" --version | tail -1 | tr -d '\r')
+          case "$version" in
+            4.5.1.stable.custom_build."${GODOT_REV:0:9}") echo "--version: $version" ;;
+            *) echo "--version printed '$version', expected 4.5.1.stable.custom_build.${GODOT_REV:0:9}"; exit 1 ;;
+          esac
+
+          # The stamp, byte for byte what arcade's stage-artefacts writes (nushell's
+          # `{rev, godotjs_rev} | to json`: two-space indent, no trailing newline).
+          printf '{\n  "rev": "%s",\n  "godotjs_rev": "%s"\n}' "$LIBGODOT_REV" "$GODOTJS_REV" > "$editor/.build-libgodot-pins.json"
+
+          # MIT permits redistributing the binaries only with the notices beside them.
+          lic=stage/licenses
+          mkdir -p "$lic"
+          cp "$src/godot/LICENSE.txt" "$lic/godot-LICENSE.txt"
+          cp "$src/godot/COPYRIGHT.txt" "$lic/godot-COPYRIGHT.txt"
+          cp "$module/LICENSE" "$lic/godotjs-LICENSE.txt"
+          cp "$module/quickjs-ng/LICENSE" "$lic/quickjs-ng-LICENSE.txt"
+          quickjs_rev=$(git -C "$module/quickjs-ng" rev-parse HEAD)
+          cat > stage/NOTICE.txt <<EOF
+          Arcade engine artifacts (bahalafoundation/arcade): copyright and licence notices
+          ===============================================================================
+
+          This release holds builds of open-source software, published by Bahala from its
+          fork of GodotJS. Every component below is MIT-licensed, which permits
+          redistribution in binary form but REQUIRES that this notice and the licence texts
+          beside it travel with the binaries. Nothing proprietary to Bahala is in them.
+
+          Artifacts this notice covers
+            libgodot-xcframework       the embeddable engine for iOS (GodotJS on JavaScriptCore)
+            godot-editor-macos-arm64   the macOS arm64 host editor from the same build
+            godot-lib-android-aar      the embeddable engine for Android (GodotJS on QuickJS-NG)
+
+          Components, at the exact revisions built
+            Godot Engine   https://github.com/migeran/godot
+                           ${GODOT_REV}
+                           (the godot submodule of https://github.com/migeran/libgodot at
+                           ${LIBGODOT_REV}, which carries build scripts only)
+                           MIT, see godot-LICENSE.txt; third-party components bundled by
+                           Godot itself: godot-COPYRIGHT.txt
+            GodotJS        https://github.com/bahalafoundation/GodotJS  (branch \`bahala\`)
+                           ${GODOTJS_REV}
+                           MIT, see godotjs-LICENSE.txt
+            QuickJS-NG     https://github.com/quickjs-ng/quickjs  (in the Android .aar only)
+                           ${quickjs_rev}
+                           MIT, see quickjs-ng-LICENSE.txt
+
+          JavaScriptCore, GodotJS's engine on iOS and macOS, is linked as a system framework;
+          no part of it is redistributed here.
+
+          Built by ${RUN_URL}
+          EOF
+          cp stage/NOTICE.txt "$editor/NOTICE.txt"
+          cp "$lic"/* "$editor/licenses/"
+          cp stage/NOTICE.txt "$lic"/* dist/
+
+          # ditto archives a path's CONTENTS at the zip root, the layout arcade's
+          # ci/vendor.nu unpacks: the framework's own Info.plist/ios-arm64/... for the
+          # xcframework, and the editor directory for Vendor/godot-editor-macos-arm64/.
+          ditto -c -k --sequesterRsrc "$xcf" dist/libgodot-xcframework.zip
+          ditto -c -k --sequesterRsrc "$editor" dist/godot-editor-macos-arm64.zip
+          cp "$editor/.build-libgodot-pins.json" dist/godot-editor-macos-arm64.stamp.json
+          cp "$RUNNER_TEMP/xcode-version" dist/xcode-version.txt
+          cd dist
+          for z in libgodot-xcframework.zip godot-editor-macos-arm64.zip; do
+            shasum -a 256 "$z" > "$z.sha256"
+            cat "$z.sha256"
+          done
+          ls -l
+
+      # ---------------------------------------------------------------- android half ---
+
+      - name: "Android: SDK platform, build-tools and NDK (from config.gradle)"
+        if: matrix.part == 'android'
+        run: |
+          set -euo pipefail
+          cfg=libgodot/godot/platform/android/java/app/config.gradle
+          field() { grep -E "^\s*$1\s*:" "$cfg" | head -1 | cut -d: -f2- | tr -d " ,'"; }
+          sdk=$(field compileSdk); bt=$(field buildTools); ndk=$(field ndkVersion)
+          echo "config.gradle: compileSdk $sdk, buildTools $bt, NDK $ndk"
+          # The JDK config.gradle's javaVersion asks for (arcade pins the same in .mise.toml).
+          java17="${JAVA_HOME_17_arm64:-}"
+          test -n "$java17"
+          echo "JAVA_HOME=$java17" >> "$GITHUB_ENV"
+          export JAVA_HOME="$java17"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" --install platform-tools "platforms;android-$sdk" "build-tools;$bt" "ndk;$ndk" > /dev/null
+          ls "$ANDROID_HOME/ndk"
+
+      # arcade's build-android-engine: this pin's Android backend needs opengl3=no and an
+      # empty angle_libs, plus the two patches this fork carries (see bahala/patches/godot/).
+      - name: "Android: engine"
+        if: matrix.part == 'android'
+        working-directory: libgodot/godot
+        run: |
+          set -euo pipefail
+          for p in modules/godotjs/bahala/patches/godot/*.patch; do
+            git apply "$p"
+            echo "applied $(basename "$p")"
+          done
+          scons platform=android arch=arm64 target=template_debug use_quickjs_ng=yes angle_libs="" opengl3=no "-j$(sysctl -n hw.logicalcpu)"
+
+      # arcade's patch-gradle-scons-args + build-android-template. The patch keeps the
+      # backend if gradle ever re-invokes scons itself (it doesn't on this path; the
+      # asserts below check the bytes either way).
+      - name: "Android: .aar"
+        if: matrix.part == 'android'
+        working-directory: libgodot/godot
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process
+        run: |
+          set -euo pipefail
+          f=platform/android/java/lib/build.gradle
+          # shellcheck disable=SC2016 # ${selectedAbi} is Groovy, matched literally
+          anchor='"arch=${selectedAbi}", "-j"'
+          grep -qF "$anchor" "$f" || { echo "$f: scons args anchor not found; build.gradle changed shape?"; exit 1; }
+          python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]
+          t = open(p).read()
+          t = t.replace('"arch=${selectedAbi}", "-j"', '"arch=${selectedAbi}", "use_quickjs_ng=yes", "-j"')
+          open(p, "w").write(t)
+          PY
+          cd platform/android/java
+          ./gradlew generateGodotTemplates
+
+      # arcade's stage-and-verify-android-aar: QuickJS-NG and nothing else, the
+      # getRenderView JNI lookup (arcade#72), and 16 KB page alignment (Play requires it).
+      - name: "Android: check and package"
+        if: matrix.part == 'android'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          aar=libgodot/godot/bin/godot-lib.template_debug.aar
+          so="$RUNNER_TEMP/libgodot_android.so"
+          unzip -p "$aar" jni/arm64-v8a/libgodot_android.so > "$so"
+          s=$(strings "$so")
+          grep -q 'impl/quickjs' <<<"$s" || { echo "no QuickJS-NG sources baked in"; exit 1; }
+          if grep -qiE 'v8_monolith|v8::internal|impl/jsc/' <<<"$s"; then echo "links a JavaScript engine other than QuickJS-NG"; exit 1; fi
+          echo "libgodot_android.so: QuickJS-NG backend, no other JavaScript engine"
+          grep -q getRenderView <<<"$s" || { echo "no getRenderView JNI lookup (arcade#72)"; exit 1; }
+          echo "libgodot_android.so: getRenderView JNI lookup present"
+          readelf=$(find "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt -path '*/bin/llvm-readelf' | head -1)
+          aligns=$("$readelf" -l "$so" | awk '$1 == "LOAD" {print $NF}' | sort -u)
+          test -n "$aligns"
+          [ "$aligns" = 0x4000 ] || { echo "LOAD segments align to: $aligns, not 0x4000 (16 KB)"; exit 1; }
+          echo "libgodot_android.so: all LOAD segments 16 KB (0x4000) aligned"
+          # The .aar keeps gradle's name, at the zip root (arcade's `unpack: aar`).
+          cp "$aar" "$RUNNER_TEMP/"
+          ditto -c -k --sequesterRsrc "$RUNNER_TEMP/godot-lib.template_debug.aar" dist/godot-lib-android-aar.zip
+          cd dist
+          shasum -a 256 godot-lib-android-aar.zip > godot-lib-android-aar.zip.sha256
+          cat godot-lib-android-aar.zip.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libgodot-${{ matrix.part }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish the release
+    needs: [plan, build]
+    if: needs.plan.outputs.exists != 'true' && needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: libgodot-*
+          merge-multiple: true
+          path: dist
+
+      - name: Write the checksums and release notes
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.zip.sha256 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 3
+          base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
+          sha() { awk -v f="$1" '$2 == f { print $1 }' SHA256SUMS; }
+          {
+            echo "The engine [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) embeds and ships (#170): the migeran/libgodot fork + this fork's GodotJS."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| libgodot | migeran/libgodot@\`$LIBGODOT_REV\` (Godot 4.5.1) |"
+            echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
+            echo "| Backends | JavaScriptCore (iOS xcframework, macOS editor); QuickJS-NG (Android .aar) |"
+            echo "| Toolchain | $(head -1 xcode-version.txt) ($(tail -1 xcode-version.txt)), SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION, JDK 17 |"
+            echo "| Built by | $RUN_URL |"
+            echo
+            echo "## SHA-256"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            echo "## Stamp (\`.build-libgodot-pins.json\` inside godot-editor-macos-arm64.zip)"
+            echo
+            echo '```json'
+            cat godot-editor-macos-arm64.stamp.json
+            echo
+            echo '```'
+            echo
+            echo "## vendor.yaml"
+            echo
+            echo '```yaml'
+            echo "  - name: libgodot"
+            echo "    platforms: [ios]"
+            echo "    version: 4.5.1"
+            echo "    release: $base"
+            echo "    artifact: libgodot-xcframework"
+            echo "    sha256: $(sha libgodot-xcframework.zip)"
+            echo "    unpack: xcframework"
+            echo "  - name: godot-editor-macos-arm64"
+            echo "    platforms: [editor, ios, android, content]"
+            echo "    host: macos-arm64"
+            echo "    version: 4.5.1"
+            echo "    release: $base"
+            echo "    artifact: godot-editor-macos-arm64"
+            echo "    sha256: $(sha godot-editor-macos-arm64.zip)"
+            echo "    unpack: directory"
+            echo "  - name: libgodot-android"
+            echo "    platforms: [android]"
+            echo "    version: 4.5.1"
+            echo "    release: $base"
+            echo "    artifact: godot-lib-android-aar"
+            echo "    sha256: $(sha godot-lib-android-aar.zip)"
+            echo "    unpack: aar"
+            echo '```'
+            echo
+            echo "Every component is MIT-licensed; NOTICE.txt and the licence texts are attached, and the editor's zip carries them too."
+          } > notes.md
+          cat notes.md
+
+      # Tagged at the module commit the engine was built from, which is what the tag names.
+      - name: Create the release
+        run: |
+          set -euo pipefail
+          cd dist
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+            --target "$GODOTJS_REV" \
+            --title "Engine: libgodot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7}" \
+            --notes-file notes.md \
+            --latest=false \
+            libgodot-xcframework.zip godot-editor-macos-arm64.zip godot-lib-android-aar.zip \
+            SHA256SUMS NOTICE.txt ./*-LICENSE.txt godot-COPYRIGHT.txt
+          echo "::notice::published $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
