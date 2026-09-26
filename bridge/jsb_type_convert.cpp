@@ -4,7 +4,7 @@
 // Not ideal. Need to clean up access.
 #include "../weaver/jsb_script_language.h"
 #include "../weaver/jsb_script.h"
-#include "modules/GodotJS/weaver/jsb_script_instance.h"
+#include "modules/godotjs/weaver/jsb_script_instance.h"
 
 namespace jsb
 {

@@ -34,8 +34,8 @@
 
 //TODO remove this
 #include "../weaver/jsb_script.h"
-#include "modules/GodotJS/weaver/jsb_script_instance.h"
-#include "modules/GodotJS/weaver/jsb_script_language.h"
+#include "modules/godotjs/weaver/jsb_script_instance.h"
+#include "modules/godotjs/weaver/jsb_script_language.h"
 
 #if JSB_WITH_WEB
 #include "../impl/web/jsb_web_interop.h"

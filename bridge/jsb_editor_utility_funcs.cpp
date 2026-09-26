@@ -4,7 +4,7 @@
 #include "../internal/jsb_class_util.h"
 #include "core/object/script_language.h"
 #if JSB_WITH_EDITOR_UTILITY_FUNCS
-#include "modules/GodotJS/weaver-editor/jsb_editor_plugin.h"
+#include "modules/godotjs/weaver-editor/jsb_editor_plugin.h"
 #endif
 
 #if GODOT_4_6_OR_NEWER
