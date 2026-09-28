@@ -101,6 +101,30 @@ function(key, value, getter, setter) {
         }
         JSB_JSC_DEFINE_ATOM_END();
 
+        // WeakRef and WeakRef.prototype.deref, for v8::Global's weak handles (arcade#255). Captured before any script
+        // runs and kept protected, so a script that reassigns globalThis.WeakRef can't change what the handles use.
+        {
+            const JSStringRef weak_ref_name = JSStringCreateWithUTF8CString("WeakRef");
+            const JSStringRef deref_name = JSStringCreateWithUTF8CString("deref");
+            JSValueRef error = nullptr;
+            const JSValueRef weak_ref = JSObjectGetProperty(ctx_, global, weak_ref_name, &error);
+            CRASH_COND_MSG(error || !weak_ref || !JSValueIsObject(ctx_, weak_ref) || !JSObjectIsConstructor(ctx_, (JSObjectRef) weak_ref),
+                "JavaScriptCore has no WeakRef constructor; GodotJS's weak handles need it (macOS 11.3+/iOS 14.5+)");
+            weak_ref_constructor_ = (JSObjectRef) weak_ref;
+            JSValueProtect(ctx_, weak_ref_constructor_);
+
+            const JSValueRef prototype = _GetProperty(weak_ref_constructor_, jsb::impl::JS_ATOM_prototype);
+            CRASH_COND_MSG(!prototype || !JSValueIsObject(ctx_, prototype), "WeakRef.prototype is not an object");
+            const JSValueRef deref = JSObjectGetProperty(ctx_, (JSObjectRef) prototype, deref_name, &error);
+            CRASH_COND_MSG(error || !deref || !JSValueIsObject(ctx_, deref) || !JSObjectIsFunction(ctx_, (JSObjectRef) deref),
+                "WeakRef.prototype.deref is not a function");
+            weak_ref_deref_ = (JSObjectRef) deref;
+            JSValueProtect(ctx_, weak_ref_deref_);
+
+            JSStringRelease(weak_ref_name);
+            JSStringRelease(deref_name);
+        }
+
         // Class Definition for JSC.External
         {
             JSClassDefinition cd = kJSClassDefinitionEmpty;
@@ -159,6 +183,8 @@ function(key, value, getter, setter) {
         {
             JSValueUnprotect(ctx_, bridge_calls_[i]);
         }
+        JSValueUnprotect(ctx_, weak_ref_constructor_);
+        JSValueUnprotect(ctx_, weak_ref_deref_);
 
         // manually run GC before freeing the context/runtime to ensure all objects free-ed (valuetype objects)
         JSGarbageCollect(ctx_);
@@ -490,6 +516,35 @@ function(key, value, getter, setter) {
             return nullptr;
         }
         return rval;
+    }
+
+    JSObjectRef Isolate::_NewWeakRef(JSObjectRef target)
+    {
+        jsb_check(target);
+        JSValueRef error = nullptr;
+        const JSValueRef arg = target;
+        const JSObjectRef weak_ref = JSObjectCallAsConstructor(ctx_, weak_ref_constructor_, 1, &arg, &error);
+        // `new WeakRef(obj)` only throws for a non-object target, and the callers pass a JSObjectRef
+        jsb_checkf(!error && weak_ref, "new WeakRef() failed");
+        JSValueProtect(ctx_, weak_ref);
+        return weak_ref;
+    }
+
+    JSObjectRef Isolate::_DerefWeakRef(JSObjectRef weak_ref) const
+    {
+        jsb_check(weak_ref);
+        JSValueRef error = nullptr;
+        const JSValueRef target = JSObjectCallAsFunction(ctx_, weak_ref_deref_, weak_ref, 0, nullptr, &error);
+        jsb_checkf(!error, "WeakRef.prototype.deref() failed");
+        // undefined once the target is collected. JSC clears a WeakRef at the end of the collection that found its target
+        // dead, before the target is swept (finalized), exactly as it clears a JSWeak.
+        return target && JSValueIsObject(ctx_, target) ? (JSObjectRef) target : nullptr;
+    }
+
+    void Isolate::_ReleaseWeakRef(JSObjectRef weak_ref)
+    {
+        jsb_check(weak_ref);
+        JSValueUnprotect(ctx_, weak_ref);
     }
 
     void _CFunction_finalize(JSObjectRef obj)

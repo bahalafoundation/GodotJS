@@ -176,6 +176,14 @@ namespace v8
         JSObjectRef _NewConstructor(JSObjectCallAsConstructorCallback func, const char* name, v8::FunctionCallback callback, uint32_t class_payload);
         JSObjectRef _NewObjectProtoClass(JSValueRef prototype, void* data);
         void _delete_cfunction(jsb::impl::CapturedValueID id);
+
+        // Weak references through the public WeakRef API (arcade#255), for v8::Global. JavaScriptCore's C API has no public
+        // weak handle; JSWeakCreate/JSWeakGetObject/JSWeakRelease are private SPI, which App Store Connect rejects (ITMS-90338).
+        // _NewWeakRef returns a protected `new WeakRef(target)`, released by _ReleaseWeakRef.
+        // _DerefWeakRef returns its target, or nullptr once the target is collected.
+        JSObjectRef _NewWeakRef(JSObjectRef target);
+        JSObjectRef _DerefWeakRef(JSObjectRef weak_ref) const;
+        void _ReleaseWeakRef(JSObjectRef weak_ref);
         JSValueRef _get_captured_value(jsb::impl::CapturedValueID id) { return captured_values_.get_value(id); }
 
         // return nullptr if exception is thrown (saved in stack)
@@ -346,6 +354,10 @@ namespace v8
         HandleScope* handle_scope_;
 
         JSObjectRef bridge_calls_[jsb::impl::JSBridgeCall::Num];
+
+        // WeakRef and WeakRef.prototype.deref as they were when the isolate was created (protected)
+        JSObjectRef weak_ref_constructor_ = nullptr;
+        JSObjectRef weak_ref_deref_ = nullptr;
 
         jsb::internal::SArray<JSValueRef, jsb::impl::CapturedValueID> captured_values_;
         RingBuffer<jsb::impl::CapturedValueID> pending_delete_;

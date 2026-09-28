@@ -22,6 +22,11 @@ namespace jsb::impl
         // unlike SetWeak(isolate, obj, nullptr, nullptr) this works after the JS object is collected (see v8::Global::_clear_weak_callback)
         static void ClearWeakCallback(void* internal_data);
 
+        // see v8::Isolate::_NewWeakRef/_DerefWeakRef/_ReleaseWeakRef
+        static JSObjectRef NewWeakRef(v8::Isolate* isolate, JSObjectRef target);
+        static JSObjectRef DerefWeakRef(v8::Isolate* isolate, JSObjectRef weak_ref);
+        static void ReleaseWeakRef(v8::Isolate* isolate, JSObjectRef weak_ref);
+
         static JSContextGroupRef rt(v8::Isolate* isolate);
         static JSContextRef ctx(v8::Isolate* isolate);
 
