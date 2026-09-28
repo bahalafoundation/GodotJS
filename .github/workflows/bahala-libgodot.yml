@@ -62,10 +62,14 @@ on:
         default: xcode-27
         type: choice
         options: [xcode-27, macos-26]
+      clang_override:
+        description: "SPIKE arcade#253: CCC_OVERRIDE_OPTIONS for every clang in the build (e.g. '# x-g2 +-gline-tables-only')"
+        default: ""
+        type: string
 
 concurrency:
   # SPIKE: its own group, so this branch never queues a real `bahala` run behind it.
-  group: bahala-libgodot-spike253
+  group: bahala-libgodot-spike253-${{ github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -159,6 +163,10 @@ jobs:
     timeout-minutes: 180
     env:
       GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
+      # SPIKE (arcade#253): clang edits its own argv from this; '# x-g2 +-gline-tables-only'
+      # swaps SConstruct's -g2 for line tables only (-gdwarf-4 stays, so the level is the last
+      # -g flag), which is all symbolication reads. Empty = the first spike run's full -g2.
+      CCC_OVERRIDE_OPTIONS: ${{ inputs.clang_override }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     defaults:
       run:
