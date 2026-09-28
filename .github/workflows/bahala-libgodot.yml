@@ -1,5 +1,10 @@
 name: Bahala libgodot
 
+# SPIKE-ONLY (bahalafoundation/arcade#253), branch spike-253-symbols: never merge into
+# `bahala`. Builds the same engine WITH debug symbols and measures them, uploading only
+# workflow artifacts. It can never publish: `publish` is false off `bahala`, and
+# LIBGODOT_RECIPE below is a spike value no release will ever carry.
+
 # Builds the engine bahalafoundation/arcade embeds and ships, and publishes it as a GitHub
 # Release that arcade's vendor.yaml pins (bahalafoundation/arcade#170):
 #
@@ -59,7 +64,8 @@ on:
         options: [xcode-27, macos-26]
 
 concurrency:
-  group: bahala-libgodot
+  # SPIKE: its own group, so this branch never queues a real `bahala` run behind it.
+  group: bahala-libgodot-spike253
   cancel-in-progress: false
 
 permissions:
@@ -87,7 +93,7 @@ env:
   #      that turned out not to fix anything (reverted), then for the actual fix — a
   #      missing null check on FileAccessPack's constructor's own FileAccess::open()
   #      result, on bahalafoundation/godot's `bahala`.
-  LIBGODOT_RECIPE: 3
+  LIBGODOT_RECIPE: 3-spike253-symbols
   # Toolchain. node/python/scons match arcade's mise.lock; pnpm is this repo's own
   # `packageManager`. Java 17 and the Android SDK come from the runner image; the NDK,
   # platform and build-tools versions are read from the libgodot tree's config.gradle.
@@ -238,6 +244,12 @@ jobs:
       - name: "Apple: iOS library and xcframework"
         if: matrix.part == 'apple'
         working-directory: libgodot
+        env:
+          # SPIKE (arcade#253): SCons prepends SCONSFLAGS to the command line, so this reaches
+          # build_libgodot.sh's own `scons p=ios ...` as ARGUMENTS, where SConstruct's
+          # get_cmdline_bool("debug_symbols") reads it. -gdwarf-4 -g2 in every object of
+          # libgodot.a, so the framework's dwarf-with-dsym link produces a real dSYM.
+          SCONSFLAGS: debug_symbols=yes
         run: |
           set -euo pipefail
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
@@ -248,6 +260,34 @@ jobs:
           test -d "$sim" || { echo "no ios-arm64-simulator slice: found $(ls build/libgodot/debug/libgodot.xcframework)"; exit 1; }
           codesign --force --sign - "$sim"
           echo "signed $sim ad hoc"
+
+      - name: "Apple: SPIKE measure the dSYMs (arcade#253)"
+        if: matrix.part == 'apple'
+        run: |
+          set -euo pipefail
+          xcf=libgodot/build/libgodot/debug/libgodot.xcframework
+          mkdir -p dist/symbols
+          {
+            echo "## Apple symbols, $(date -u +%FT%TZ)"
+            for slice in ios-arm64 ios-arm64-simulator; do
+              bin="$xcf/$slice/libgodot.framework/libgodot"
+              dsym="$xcf/$slice/dSYMs/libgodot.framework.dSYM"
+              dwarf="$dsym/Contents/Resources/DWARF/libgodot"
+              echo "### $slice"
+              echo "binary bytes: $(stat -f %z "$bin")"
+              echo "binary nlist symbols: $(nm "$bin" | wc -l | tr -d ' ')"
+              echo "dSYM DWARF bytes: $(stat -f %z "$dwarf")"
+              dwarfdump --uuid "$bin" "$dwarf"
+              xcrun llvm-dwarfdump --statistics "$dwarf" | python3 -c 'import json,sys; d=json.load(sys.stdin); print({k: d.get(k) for k in ["#functions","#inlined functions","#source variables","#bytes within functions"]})' || true
+              xcrun llvm-objdump -h "$dwarf" | grep -E '__debug_(info|line|str|ranges|loc)' || true
+              cp "$bin" "$RUNNER_TEMP/libgodot-$slice-stripped"
+              strip -S -x "$RUNNER_TEMP/libgodot-$slice-stripped"
+              echo "binary after strip -S -x bytes: $(stat -f %z "$RUNNER_TEMP/libgodot-$slice-stripped")"
+              ( cd "$xcf/$slice/dSYMs" && ditto -c -k --keepParent libgodot.framework.dSYM "$GITHUB_WORKSPACE/dist/symbols/libgodot-$slice.dSYM.zip" )
+              echo "dSYM zip bytes: $(stat -f %z "dist/symbols/libgodot-$slice.dSYM.zip")"
+              if xz -T0 -6 -k -c "$dwarf" > "$RUNNER_TEMP/dwarf.xz"; then echo "dSYM DWARF xz -6 bytes: $(stat -f %z "$RUNNER_TEMP/dwarf.xz")"; fi
+            done
+          } | tee dist/symbols/apple-sizes.txt
 
       # arcade's stage-artefacts and assert-jsc-only, then the notices and the stamp.
       - name: "Apple: stage, check and package"
@@ -390,7 +430,11 @@ jobs:
         working-directory: libgodot/godot
         run: |
           set -euo pipefail
-          scons platform=android arch=arm64 target=template_debug use_quickjs_ng=yes angle_libs="" opengl3=no "-j$(sysctl -n hw.logicalcpu)"
+          # SPIKE (arcade#253): debug_symbols=yes drops the `-s` link flag and adds -gdwarf-4 -g2.
+          scons platform=android arch=arm64 target=template_debug use_quickjs_ng=yes angle_libs="" opengl3=no debug_symbols=yes "-j$(sysctl -n hw.logicalcpu)"
+          # Keep the unstripped library scons produced, BEFORE gradle packages it.
+          mkdir -p "$GITHUB_WORKSPACE/dist/symbols"
+          cp platform/android/java/lib/libs/debug/arm64-v8a/libgodot_android.so "$RUNNER_TEMP/libgodot_android.unstripped.so"
 
       # arcade's patch-gradle-scons-args + build-android-template. The patch keeps the
       # backend if gradle ever re-invokes scons itself (it doesn't on this path; the
@@ -415,6 +459,31 @@ jobs:
           PY
           cd platform/android/java
           ./gradlew generateGodotTemplates
+
+      - name: "Android: SPIKE measure the unstripped .so (arcade#253)"
+        if: matrix.part == 'android'
+        run: |
+          set -euo pipefail
+          bin=$(find "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt -maxdepth 2 -path '*/bin' | head -1)
+          u="$RUNNER_TEMP/libgodot_android.unstripped.so"
+          a="$RUNNER_TEMP/libgodot_android.aar.so"
+          unzip -p libgodot/godot/bin/godot-lib.template_debug.aar jni/arm64-v8a/libgodot_android.so > "$a"
+          "$bin/llvm-objcopy" --only-keep-debug "$u" "$RUNNER_TEMP/libgodot_android.so.debug"
+          "$bin/llvm-objcopy" --strip-all "$u" "$RUNNER_TEMP/libgodot_android.stripped-all.so"
+          "$bin/llvm-objcopy" --strip-debug "$u" "$RUNNER_TEMP/libgodot_android.strip-debug.so"
+          {
+            echo "## Android symbols, $(date -u +%FT%TZ)"
+            for f in "$u" "$a" "$RUNNER_TEMP/libgodot_android.so.debug" "$RUNNER_TEMP/libgodot_android.stripped-all.so" "$RUNNER_TEMP/libgodot_android.strip-debug.so"; do
+              echo "### $(basename "$f")"
+              echo "bytes: $(stat -f %z "$f")"
+              "$bin/llvm-readelf" -n "$f" | grep -i 'build id' || echo "no build id"
+              "$bin/llvm-readelf" -S -W "$f" | grep -E ' \.(symtab|debug_info|debug_line|debug_str|debug_loclists|debug_rnglists|gnu_debugdata) ' || echo "  no .symtab/.debug_* sections"
+            done
+            if xz -T0 -6 -k -c "$u" > "$RUNNER_TEMP/u.xz"; then echo "unstripped xz -6 bytes: $(stat -f %z "$RUNNER_TEMP/u.xz")"; fi
+            echo "aar's .so identical to scons's unstripped .so: $(cmp -s "$u" "$a" && echo yes || echo no)"
+          } | tee dist/symbols/android-sizes.txt
+          cp "$u" dist/symbols/libgodot_android.unstripped.so
+          cp "$a" dist/symbols/libgodot_android.aar.so
 
       # arcade's stage-and-verify-android-aar: QuickJS-NG and nothing else, the
       # getRenderView JNI lookup (arcade#72), and 16 KB page alignment (Play requires it).
@@ -449,7 +518,7 @@ jobs:
           name: libgodot-${{ matrix.part }}
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
   publish:
     name: Publish the release
