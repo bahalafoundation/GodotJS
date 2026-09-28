@@ -135,7 +135,19 @@ namespace v8
         void** internal_fields_;
     };
 
-    //TODO use JSWeakRef (JSWeakPrivate.h)
+    // A persistent handle. Strong: `value_`, protected with JSValueProtect. Weak: `shadow_`, a protected JS `WeakRef` to the
+    // object, and `value_` is unused.
+    //
+    // Weak handles go through WeakRef (created and dereferenced with the public C API, see Isolate::_NewWeakRef) because
+    // JavaScriptCore's C API has no public weak handle. The one it has, JSWeakCreate/JSWeakGetObject/JSWeakRelease, is
+    // private SPI, and App Store Connect rejects any binary that references it (ITMS-90338, arcade#255). A WeakRef has
+    // the liveness a JSWeak had: JSC clears both at the end of the collection that finds the object unreachable, before
+    // the object is swept and its class finalizer runs. So is_alive() never reports a dead object as alive, and the weak
+    // callback keeps coming from the class finalizer (Isolate::_BridgeInstance_finalizer), exactly as before.
+    //
+    // WeakRef.prototype.deref() keeps its target alive until the current synchronous run of JS ends (ECMA-262 KeepDuringJob;
+    // for JSC that is when the API lock is released or microtasks drain). A deref from native code outside of JS therefore
+    // pins nothing; one inside a JS->native call pins the object only until that outermost call returns.
     template <typename T>
     class Global
     {
@@ -172,7 +184,7 @@ namespace v8
                 return;
             }
             // kWeak: nothing was registered by this handle, keep the previous behaviour (a no-op once the object is dead)
-            jsb::impl::Broker::SetWeak(isolate_, JSWeakGetObject(shadow_), nullptr, nullptr);
+            jsb::impl::Broker::SetWeak(isolate_, jsb::impl::Broker::DerefWeakRef(isolate_, shadow_), nullptr, nullptr);
         }
 
     public:
@@ -231,9 +243,8 @@ namespace v8
             case WeakType::kWeakCallback:
                 {
                     // clear callback (also when the object is already collected, see _clear_weak_callback)
-                    const JSContextGroupRef rt = jsb::impl::Broker::rt(isolate_);
                     _clear_weak_callback();
-                    JSWeakRelease(rt, shadow_);
+                    jsb::impl::Broker::ReleaseWeakRef(isolate_, shadow_);
                     shadow_ = nullptr;
                     break;
                 }
@@ -272,9 +283,12 @@ namespace v8
 
         void ClearWeak()
         {
-            jsb_check(isolate_ && weak_type_ != WeakType::kStrong && is_alive());
-            const JSContextGroupRef rt = jsb::impl::Broker::rt(isolate_);
+            jsb_check(isolate_ && weak_type_ != WeakType::kStrong);
             const JSContextRef ctx = jsb::impl::Broker::ctx(isolate_);
+
+            // one deref, protected at once: the object can't be collected between the liveness check and the protect
+            const JSObjectRef obj = jsb::impl::Broker::DerefWeakRef(isolate_, shadow_);
+            jsb_check(obj);
 
             if (weak_type_ == WeakType::kWeakCallback)
             {
@@ -283,9 +297,9 @@ namespace v8
             }
 
             weak_type_ = WeakType::kStrong;
-            value_ = JSWeakGetObject(shadow_);
+            value_ = obj;
             JSValueProtect(ctx, value_);
-            JSWeakRelease(rt, shadow_);
+            jsb::impl::Broker::ReleaseWeakRef(isolate_, shadow_);
             shadow_ = nullptr;
         }
 
@@ -293,12 +307,11 @@ namespace v8
         void SetWeak()
         {
             jsb_check(isolate_ && weak_type_ == WeakType::kStrong);
-            const JSContextGroupRef rt = jsb::impl::Broker::rt(isolate_);
             const JSContextRef ctx = jsb::impl::Broker::ctx(isolate_);
 
             weak_type_ = WeakType::kWeak;
             const JSObjectRef obj = jsb::impl::JavaScriptCore::AsObject(ctx, value_);
-            shadow_ = JSWeakCreate(rt, obj);
+            shadow_ = jsb::impl::Broker::NewWeakRef(isolate_, obj);
             jsb::impl::Broker::SetWeak(isolate_, obj, nullptr, nullptr);
             JSValueUnprotect(ctx, value_);
             value_ = nullptr;
@@ -308,13 +321,12 @@ namespace v8
         void SetWeak(S* parameter, typename WeakCallbackInfo<S>::Callback callback, v8::WeakCallbackType type)
         {
             jsb_check(isolate_ && weak_type_ == WeakType::kStrong);
-            const JSContextGroupRef rt = jsb::impl::Broker::rt(isolate_);
             const JSContextRef ctx = jsb::impl::Broker::ctx(isolate_);
             jsb_check(JSValueIsObject(ctx, value_));
 
             weak_type_ = WeakType::kWeakCallback;
             const JSObjectRef obj = jsb::impl::JavaScriptCore::AsObject(ctx, value_);
-            shadow_ = JSWeakCreate(rt, obj);
+            shadow_ = jsb::impl::Broker::NewWeakRef(isolate_, obj);
             // remember where the callback lives so Reset() can disarm it after `obj` is collected (see _clear_weak_callback)
             internal_data_ = jsb::impl::Broker::GetInternalData(obj);
             jsb::impl::Broker::SetWeak(isolate_, obj, parameter, (void*) callback);
@@ -335,15 +347,15 @@ namespace v8
         {
             jsb_check(isolate_);
             if (weak_type_ == WeakType::kStrong) return value_;
-            return JSWeakGetObject(shadow_);
+            return jsb::impl::Broker::DerefWeakRef(isolate_, shadow_);
         }
 
         template <typename S>
         bool operator==(const Global<S>& other) const
         {
             return jsb::impl::Broker::IsStrictEqual(isolate_,
-                weak_type_ != WeakType::kStrong ? JSWeakGetObject(shadow_) : value_,
-                other.weak_type_ != WeakType::kStrong ? JSWeakGetObject(other.shadow_) : other.value_);
+                weak_type_ != WeakType::kStrong ? jsb::impl::Broker::DerefWeakRef(isolate_, shadow_) : value_,
+                other.weak_type_ != WeakType::kStrong ? jsb::impl::Broker::DerefWeakRef(other.isolate_, other.shadow_) : other.value_);
         }
 
         template <typename S>
@@ -365,14 +377,13 @@ namespace v8
         }
 
     private:
-        // A primitive JSValue is always alive (shadow_ == nullptr).
-        // Otherwise, check if the QuickJS internal JSObject* has not been deleted from the phantom list.
-        bool is_alive() const { return weak_type_ == WeakType::kStrong || !!JSWeakGetObject(shadow_); }
+        // A strong handle is always alive. A weak one is alive until its WeakRef's target is collected.
+        bool is_alive() const { return weak_type_ == WeakType::kStrong || !!jsb::impl::Broker::DerefWeakRef(isolate_, shadow_); }
 
         Isolate* isolate_ = nullptr;
 
-        // only used for weak handle
-        JSWeakRef shadow_ = nullptr;
+        // only used for weak handle: a protected `new WeakRef(object)` (see the class comment)
+        JSObjectRef shadow_ = nullptr;
 
         // value_ is not protected if this handle is weak, check is_alive() before accessing value_
         JSValueRef value_ = nullptr;

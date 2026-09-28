@@ -40,6 +40,21 @@ namespace jsb::impl
         }
     }
 
+    JSObjectRef Broker::NewWeakRef(v8::Isolate* isolate, JSObjectRef target)
+    {
+        return isolate->_NewWeakRef(target);
+    }
+
+    JSObjectRef Broker::DerefWeakRef(v8::Isolate* isolate, JSObjectRef weak_ref)
+    {
+        return isolate->_DerefWeakRef(weak_ref);
+    }
+
+    void Broker::ReleaseWeakRef(v8::Isolate* isolate, JSObjectRef weak_ref)
+    {
+        isolate->_ReleaseWeakRef(weak_ref);
+    }
+
     JSValueRef Broker::stack_val(v8::Isolate* isolate, uint16_t index)
     {
         return isolate->stack_val(index);
