@@ -37,7 +37,8 @@ GodotJS fork". What follows are the rules for working in this repository.
   - `bahala-libgodot.yml` publishes the engine Arcade ships (the
     bahalafoundation/libgodot fork + GodotJS): the iOS xcframework (device and arm64
     Simulator slices) and macOS editor on JavaScriptCore, and the Android
-    `.aar` on QuickJS-NG, as `libgodot-<7>-godotjs-<7>-r<recipe>`. It runs on
+    `.aar` on QuickJS-NG, as `libgodot-<7>-godotjs-<7>-r<recipe>`, with both
+    engines' debug symbols as `libgodot-symbols.zip` (arcade#261). It runs on
     the hosted `xcode-27` runner; if that preview label breaks, dispatch it
     with `runner=macos-26`.
 - **Releases are never overwritten.** Both workflows name a release after the
