@@ -9,6 +9,18 @@ name: Bahala libgodot
 #   godot-editor-macos-arm64.zip   the macOS arm64 host editor from the same tree (it
 #                                  exports the packs the engines above/below load)
 #   godot-lib-android-aar.zip      the Android engine, GodotJS on QuickJS-NG
+#   libgodot-symbols.zip           both engines' debug symbols, for arcade's crash
+#                                  reporting (arcade#260); not vendored, see below
+#
+# Debug symbols (arcade#261). Both engines are compiled with debug_symbols=yes. Their DWARF
+# (each iOS slice's dSYM, and the Android .so as scons linked it, before gradle strips it)
+# is sorted by Sentry's `symsorter -z` into Symbolicator's `unified` layout,
+# unified/<id[0:2]>/<id[2:]>/{debuginfo,executable} keyed by Mach-O UUID or ELF build id
+# and zstd-compressed, the tree arcade copies into R2 when its pin moves. Symbols can only
+# come from the run that publishes: -g changes code layout, so a build without it can never
+# be symbolicated, and a later rebuild runs on a different hosted Xcode. They stay out of
+# what arcade vendors: the xcframework carries no dSYMs and no debug map, and the .aar's
+# .so is stripped, so the pinned zips don't grow.
 #
 # Sibling of bahala-host-editors.yml (#169), which publishes the Linux/Windows host editors
 # built from VANILLA Godot. This one builds the bahalafoundation/libgodot fork at
@@ -34,8 +46,8 @@ name: Bahala libgodot
 # arcade's app builds with. It is a public-preview label; if it goes away or breaks,
 # dispatch with runner=macos-26 (GA, Xcode 26.6), which built this recipe green in
 # the #170 spike (run 36254045473, ~39 min). The Xcode a release was built with is in its
-# notes. Both are 3-vCPU M1 VMs with 7 GB RAM: the Apple half takes ~30 min there, the
-# Android half ~15 min, in parallel, and neither comes near the disk (a 12 GiB peak).
+# notes. Both are 3-vCPU M1 VMs with 7 GB RAM: with debug symbols the Apple half takes
+# ~62 min there, the Android half ~30 min, in parallel, and neither comes near the disk.
 #
 # Releases are IMMUTABLE here: arcade pins each zip by SHA-256, and a rebuild of the same
 # commits produces different bytes (the xcframework is not reproducible bit-for-bit), so
@@ -44,7 +56,7 @@ name: Bahala libgodot
 # this recipe. If that release exists, nothing is built. A change to the recipe that
 # changes what's built bumps LIBGODOT_RECIPE, and so gets a new release rather than
 # silently mapping onto the old one; a change that doesn't (a comment, the notes) leaves
-# it alone and builds nothing. All three artifacts come from one run or none: a failed
+# it alone and builds nothing. All four artifacts come from one run or none: a failed
 # half publishes nothing, and re-running the failed job completes the release.
 
 on:
@@ -87,13 +99,20 @@ env:
   #      that turned out not to fix anything (reverted), then for the actual fix — a
   #      missing null check on FileAccessPack's constructor's own FileAccess::open()
   #      result, on bahalafoundation/godot's `bahala`.
-  LIBGODOT_RECIPE: 3
+  #   4  arcade#261: both engines built with debug_symbols=yes, the xcframework without
+  #      dSYMs or debug map, and libgodot-symbols.zip
+  LIBGODOT_RECIPE: 4
   # Toolchain. node/python/scons match arcade's mise.lock; pnpm is this repo's own
   # `packageManager`. Java 17 and the Android SDK come from the runner image; the NDK,
   # platform and build-tools versions are read from the libgodot tree's config.gradle.
   NODE_VERSION: 22.23.2
   PNPM_VERSION: 10.11.0
   SCONS_VERSION: 4.11.1
+  # symsorter (getsentry/symbolicator's release asset, pinned by its SHA-256) from the
+  # Symbolicator release arcade's crash service is built on (arcade#260), so the layout it
+  # writes is the one that service reads.
+  SYMSORTER_VERSION: 26.9.0
+  SYMSORTER_SHA256: 8d7c591ac1894fbe65f2b22098068b7dedf85b7d39a982ddf58c725c5149486b
   PYTHONUNBUFFERED: "1"
 
 jobs:
@@ -235,17 +254,48 @@ jobs:
       # Ad-hoc signed, as arcade's sign-simulator-slice does: the app's Simulator builds
       # are unsigned, so nothing else signs it, and the Simulator's dyld refuses to load
       # an unsigned library (spike #176's first launch died on exactly that).
+      #
+      # Debug symbols (see the header): SCons prepends SCONSFLAGS to its command line, the
+      # only place SConstruct reads debug_symbols from (custom.py can't set it), and
+      # build_libgodot.sh passes no flags of its own through. Both passes' objects then
+      # carry DWARF, and the framework target's dwarf-with-dsym link makes a real dSYM per
+      # slice. The dSYMs leave the xcframework for libgodot-symbols.zip, and `strip -S`
+      # drops each binary's debug map (stabs naming the runner's object files, ~22 MB, read
+      # only by dsymutil, which has already run). Neither changes the Mach-O UUID the dSYM
+      # matches by. The slices are then re-wrapped without -debug-symbols, so Info.plist
+      # has no DebugSymbolsPath, as for any xcframework that ships no symbols: an app that
+      # embeds it gets no libgodot dSYM in its archive, so the app's own dSYM upload
+      # (arcade#263) can't put one under the engine's UUID next to the real one.
       - name: "Apple: iOS library and xcframework"
         if: matrix.part == 'apple'
         working-directory: libgodot
+        env:
+          SCONSFLAGS: debug_symbols=yes
         run: |
           set -euo pipefail
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
           ./build_libgodot.sh --target ios
           ./build_libgodot.sh --target ios --simulator
           ./build_libgodot_xcframework.sh --target template_debug
-          sim=build/libgodot/debug/libgodot.xcframework/ios-arm64-simulator/libgodot.framework
-          test -d "$sim" || { echo "no ios-arm64-simulator slice: found $(ls build/libgodot/debug/libgodot.xcframework)"; exit 1; }
+          xcf=build/libgodot/debug/libgodot.xcframework
+          sim=$xcf/ios-arm64-simulator/libgodot.framework
+          test -d "$sim" || { echo "no ios-arm64-simulator slice: found $(ls "$xcf")"; exit 1; }
+          for slice in ios-arm64 ios-arm64-simulator; do
+            dsym=$xcf/$slice/dSYMs/libgodot.framework.dSYM
+            test -d "$dsym" || { echo "no dSYM in $xcf/$slice"; exit 1; }
+            mkdir -p "$RUNNER_TEMP/symbols-in/$slice"
+            mv "$dsym" "$RUNNER_TEMP/symbols-in/$slice/"
+            bin=$xcf/$slice/libgodot.framework/libgodot
+            before=$(stat -f %z "$bin")
+            strip -S "$bin"
+            echo "$slice/libgodot: $before bytes, $(stat -f %z "$bin") without its debug map"
+          done
+          xcodebuild -create-xcframework \
+            -framework "$xcf/ios-arm64/libgodot.framework" \
+            -framework "$xcf/ios-arm64-simulator/libgodot.framework" \
+            -output "$RUNNER_TEMP/libgodot.xcframework"
+          rm -rf "$xcf"
+          mv "$RUNNER_TEMP/libgodot.xcframework" "$xcf"
           codesign --force --sign - "$sim"
           echo "signed $sim ad hoc"
 
@@ -274,6 +324,29 @@ jobs:
           codesign -dv "$sim" 2>&1 | grep -q '^Signature=adhoc$' || { echo "$sim is not ad-hoc signed"; exit 1; }
           lipo -archs "$sim/libgodot" | grep -qx arm64 || { echo "$sim/libgodot is not arm64 only: $(lipo -archs "$sim/libgodot")"; exit 1; }
           echo "ios-arm64-simulator: arm64 only, ad-hoc signed"
+
+          # Debug symbols (see the header): none inside the xcframework, and each slice's
+          # dSYM matches the binary that ships by UUID and holds the engine's DWARF (without
+          # debug_symbols=yes the link still makes a dSYM, with next to no __debug_info).
+          if [ -n "$(find "$xcf" -name '*.dSYM')" ] || grep -q DebugSymbolsPath "$xcf/Info.plist"; then
+            echo "$xcf still carries dSYMs or a DebugSymbolsPath"; exit 1
+          fi
+          mkdir -p symbols
+          : > symbols/apple.ids
+          for slice in ios-arm64 ios-arm64-simulator; do
+            bin=$xcf/$slice/libgodot.framework/libgodot
+            dwarf=$RUNNER_TEMP/symbols-in/$slice/libgodot.framework.dSYM/Contents/Resources/DWARF/libgodot
+            uuid=$(xcrun dwarfdump --uuid "$bin" | awk '{print $2}')
+            test -n "$uuid"
+            [ "$(xcrun dwarfdump --uuid "$dwarf" | awk '{print $2}')" = "$uuid" ] || { echo "$slice: the dSYM's UUID is not the binary's ($uuid)"; exit 1; }
+            oso=$(xcrun nm -ap "$bin" | grep -c ' OSO ' || true)
+            [ "$oso" = 0 ] || { echo "$bin still has a debug map ($oso object files)"; exit 1; }
+            hex=$(xcrun llvm-objdump --section-headers "$dwarf" | awk '$2 == "__debug_info" {print $3}')
+            info=$(( 16#${hex:-0} ))
+            [ "$info" -ge $(( 64 << 20 )) ] || { echo "$slice: the dSYM has only $info bytes of __debug_info"; exit 1; }
+            echo "$slice: UUID $uuid, binary $(stat -f %z "$bin") bytes, dSYM DWARF $(stat -f %z "$dwarf") bytes ($info of __debug_info)"
+            echo "$(tr -d - <<<"$uuid" | tr A-F a-f) $slice libgodot.framework" >> symbols/apple.ids
+          done
 
           # JavaScriptCore and nothing else (arcade#44): its sources' paths are baked into
           # the binary, QuickJS's and V8's names are wherever they are linked in. The
@@ -318,6 +391,7 @@ jobs:
                                        device and Simulator slices
             godot-editor-macos-arm64   the macOS arm64 host editor from the same build
             godot-lib-android-aar      the embeddable engine for Android (GodotJS on QuickJS-NG)
+            libgodot-symbols           the debug symbols of the two embeddable engines above
 
           Components, at the exact revisions built
             Godot Engine   https://github.com/bahalafoundation/godot  (branch \`bahala\`;
@@ -385,12 +459,19 @@ jobs:
       # getRenderView JNI lookup, #72) are commits on bahalafoundation/godot's `bahala`
       # branch (arcade#171), reached through LIBGODOT_REV's own `godot` gitlink — nothing
       # to apply here any more.
+      #
+      # Debug symbols (see the header): debug_symbols=yes adds DWARF and drops the `-s` link
+      # flag. Gradle strips the copy it packages into the .aar (same build id, the size it
+      # always shipped at), so the copy saved here, before gradle, is the only one that
+      # keeps the DWARF.
       - name: "Android: engine"
         if: matrix.part == 'android'
         working-directory: libgodot/godot
         run: |
           set -euo pipefail
-          scons platform=android arch=arm64 target=template_debug use_quickjs_ng=yes angle_libs="" opengl3=no "-j$(sysctl -n hw.logicalcpu)"
+          scons platform=android arch=arm64 target=template_debug use_quickjs_ng=yes angle_libs="" opengl3=no debug_symbols=yes "-j$(sysctl -n hw.logicalcpu)"
+          mkdir -p "$RUNNER_TEMP/symbols-in/android"
+          cp platform/android/java/lib/libs/debug/arm64-v8a/libgodot_android.so "$RUNNER_TEMP/symbols-in/android/"
 
       # arcade's patch-gradle-scons-args + build-android-template. The patch keeps the
       # backend if gradle ever re-invokes scons itself (it doesn't on this path; the
@@ -437,12 +518,49 @@ jobs:
           test -n "$aligns"
           [ "$aligns" = 0x4000 ] || { echo "LOAD segments align to: $aligns, not 0x4000 (16 KB)"; exit 1; }
           echo "libgodot_android.so: all LOAD segments 16 KB (0x4000) aligned"
+          # Debug symbols (see the header): the saved copy matches the shipped one by build
+          # id and holds the DWARF; the shipped one holds none.
+          u=$RUNNER_TEMP/symbols-in/android/libgodot_android.so
+          buildid() { "$readelf" -n "$1" | awk '/Build ID:/ {print $3}'; }
+          dwarf() { "$readelf" -S -W "$1" | grep -c ' \.debug_info ' || true; }
+          id=$(buildid "$so")
+          test -n "$id"
+          [ "$(buildid "$u")" = "$id" ] || { echo "the saved .so's build id is not the shipped one's ($id)"; exit 1; }
+          [ "$(dwarf "$so")" = 0 ] || { echo "the shipped libgodot_android.so still carries DWARF"; exit 1; }
+          [ "$(dwarf "$u")" = 1 ] || { echo "the saved libgodot_android.so has no DWARF: did debug_symbols reach scons?"; exit 1; }
+          echo "libgodot_android.so: build id $id, $(stat -f %z "$so") bytes shipped, $(stat -f %z "$u") with DWARF"
+          mkdir -p symbols
+          echo "$id android-arm64-v8a libgodot_android.so" > symbols/android.ids
           # The .aar keeps gradle's name, at the zip root (arcade's `unpack: aar`).
           cp "$aar" "$RUNNER_TEMP/"
           ditto -c -k --sequesterRsrc "$RUNNER_TEMP/godot-lib.template_debug.aar" dist/godot-lib-android-aar.zip
           cd dist
           shasum -a 256 godot-lib-android-aar.zip > godot-lib-android-aar.zip.sha256
           cat godot-lib-android-aar.zip.sha256
+
+      # ------------------------------------------------------------------- both halves ---
+
+      # Each half sorts the symbols it kept into the `unified` layout (see the header), on
+      # the runner that has them: the sorted, zstd-compressed tree is a fraction of the
+      # raw ~2 GB. Every id that ships (<part>.ids, written by the checks above) must come
+      # out of it with an entry, and nothing else may.
+      - name: Sort the debug symbols
+        run: |
+          set -euo pipefail
+          ss=$RUNNER_TEMP/symsorter
+          curl -fsSL -o "$ss" "https://github.com/getsentry/symbolicator/releases/download/$SYMSORTER_VERSION/symsorter-Darwin-universal"
+          echo "$SYMSORTER_SHA256  $ss" | shasum -a 256 -c -
+          chmod +x "$ss"
+          "$ss" -z -p unified -o symbols "$RUNNER_TEMP/symbols-in"
+          ids=symbols/${{ matrix.part }}.ids
+          while read -r id what file; do
+            d=symbols/unified/${id:0:2}/${id:2}
+            [ -f "$d/debuginfo" ] || [ -f "$d/executable" ] || { echo "nothing sorted for $what's $file ($id)"; exit 1; }
+            echo "$what $file: $id"
+          done < "$ids"
+          sorted=$(find symbols/unified -type f ! -name '*.meta' | wc -l | tr -d ' ')
+          [ "$sorted" = "$(wc -l < "$ids" | tr -d ' ')" ] || { echo "$sorted files sorted for $(wc -l < "$ids" | tr -d ' ') ids"; exit 1; }
+          find symbols/unified -type f ! -name '*.meta' -exec stat -f '%z bytes  %N' {} +
 
       - uses: actions/upload-artifact@v7
         with:
@@ -451,9 +569,59 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Not libgodot-*: the publish job's pattern would merge the loose tree into its dist/.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: symbols-${{ matrix.part }}
+          path: symbols/
+          if-no-files-found: error
+          retention-days: 14
+          # Already zstd.
+          compression-level: 0
+
+  # One asset for both halves' symbols, built on every run (a dispatch off `bahala` too),
+  # so what a release would carry is checked before any release exists.
+  symbols:
+    name: Package the debug symbols
+    needs: [plan, build]
+    if: needs.plan.outputs.exists != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: symbols-*
+          merge-multiple: true
+          path: symbols
+
+      - name: Zip libgodot-symbols.zip
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd symbols
+          # Stored, not deflated: every file in it is already zstd (or a few bytes of .meta).
+          zip -q -r -0 -X ../dist/libgodot-symbols.zip unified
+          cat apple.ids android.ids > ../dist/libgodot-symbols.ids
+          cd ../dist
+          test "$(wc -l < libgodot-symbols.ids)" -eq 3
+          size=$(stat -c %s libgodot-symbols.zip)
+          # GitHub refuses a release asset of 2 GiB or more.
+          [ "$size" -lt $(( 2 << 30 )) ] || { echo "libgodot-symbols.zip is $size bytes, over GitHub's 2 GiB asset limit"; exit 1; }
+          unzip -l libgodot-symbols.zip
+          sha256sum libgodot-symbols.zip > libgodot-symbols.zip.sha256
+          cat libgodot-symbols.ids libgodot-symbols.zip.sha256
+          echo "libgodot-symbols.zip: $size bytes"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libgodot-symbols
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
   publish:
     name: Publish the release
-    needs: [plan, build]
+    needs: [plan, build, symbols]
     if: needs.plan.outputs.exists != 'true' && needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -476,7 +644,7 @@ jobs:
           cd dist
           cat ./*.zip.sha256 > SHA256SUMS
           sha256sum -c SHA256SUMS
-          test "$(wc -l < SHA256SUMS)" -eq 3
+          test "$(wc -l < SHA256SUMS)" -eq 4
           base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
           sha() { awk -v f="$1" '$2 == f { print $1 }' SHA256SUMS; }
           {
@@ -489,6 +657,7 @@ jobs:
             echo "| xcframework | \`ios-arm64\` (device, what ships) + \`ios-arm64-simulator\` (arm64, ad-hoc signed, arcade#177) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
             echo "| Backends | JavaScriptCore (iOS xcframework, macOS editor); QuickJS-NG (Android .aar) |"
+            echo "| Symbols | \`libgodot-symbols.zip\`: both engines' DWARF, \`symsorter -z\` $SYMSORTER_VERSION (arcade#261) |"
             echo "| Toolchain | $(head -1 xcode-version.txt) ($(tail -1 xcode-version.txt)), SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION, JDK 17 |"
             echo "| Built by | $RUN_URL |"
             echo
@@ -503,6 +672,14 @@ jobs:
             echo '```json'
             cat godot-editor-macos-arm64.stamp.json
             echo
+            echo '```'
+            echo
+            echo "## Debug symbols"
+            echo
+            echo "\`libgodot-symbols.zip\` holds Symbolicator's \`unified\` layout (zstd) for these ids (Mach-O UUID or ELF build id), for arcade to copy into R2. It is never vendored."
+            echo
+            echo '```'
+            cat libgodot-symbols.ids
             echo '```'
             echo
             echo "## vendor.yaml"
@@ -551,6 +728,6 @@ jobs:
             --title "Engine: libgodot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7} (recipe ${LIBGODOT_RECIPE})" \
             --notes-file notes.md \
             --latest=false \
-            libgodot-xcframework.zip godot-editor-macos-arm64.zip godot-lib-android-aar.zip \
+            libgodot-xcframework.zip godot-editor-macos-arm64.zip godot-lib-android-aar.zip libgodot-symbols.zip \
             SHA256SUMS NOTICE.txt ./*-LICENSE.txt godot-COPYRIGHT.txt
           echo "::notice::published $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
