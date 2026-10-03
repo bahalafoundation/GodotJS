@@ -5,7 +5,7 @@ name: Bahala host editors
 # `just vendor` instead of compiling Godot for ~20 minutes (bahalafoundation/arcade#169).
 #
 # What is built: vanilla Godot at build.py's GODOT_VANILLA_REV with this fork linked in as
-# modules/godotjs, on the QuickJS-NG backend. Not the bahalafoundation/libgodot fork and not
+# modules/godotjs, on the QuickJS-NG backend. Not the bahalafoundation/godot fork and not
 # JavaScriptCore: these editors run Arcade's City/Blip suites and renders; they are not
 # the engine Arcade ships and never export a pack that ships.
 #
@@ -14,7 +14,7 @@ name: Bahala host editors
 # of each editor. Arcade's `just engine-build` on Linux and Windows runs the same script
 # from the commit this release's tag points at.
 #
-# Its sibling bahala-libgodot.yml publishes the engine arcade ships (the bahalafoundation/libgodot
+# Its sibling bahala-libgodot.yml publishes the engine arcade ships (the bahalafoundation/godot
 # fork: the iOS xcframework, the macOS editor and the Android .aar) the same way.
 #
 # Upstream's own workflows (runner.yml and the build_* it calls) are disabled on this fork
@@ -226,7 +226,7 @@ jobs:
           {
             echo "GodotJS host editors for [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) (#169): vanilla Godot 4.5.1-stable + this fork's GodotJS on **QuickJS-NG**."
             echo
-            echo "**Not the engine Arcade ships** (that is the bahalafoundation/libgodot fork on JavaScriptCore). These run the City/Blip suites and renders on Linux and Windows, and never export a pack that ships."
+            echo "**Not the engine Arcade ships** (that is the bahalafoundation/godot fork on JavaScriptCore). These run the City/Blip suites and renders on Linux and Windows, and never export a pack that ships."
             echo
             echo "| | |"
             echo "|---|---|"

@@ -23,7 +23,7 @@ of what is built: arcade pins a release, by tag and SHA-256, and nothing else.
 
 Parts:
     apple    macOS: the iOS xcframework (device and arm64 Simulator slices) and the macOS
-             arm64 editor, from the libgodot fork, GodotJS on JavaScriptCore
+             arm64 editor, from the godot fork, GodotJS on JavaScriptCore
     android  macOS: the Android .aar, from the same tree, GodotJS on QuickJS-NG
     host     Linux or Windows: this OS's editor, vanilla Godot plus GodotJS on QuickJS-NG.
              Not the engine that ships: it runs arcade's suites and never exports a pack.
@@ -48,12 +48,13 @@ import sys
 import tempfile
 import zipfile
 
-# bahalafoundation/libgodot (arcade#171). Its `godot` gitlink pins bahalafoundation/godot,
-# whose `bahala` carries arcade's Godot fixes as commits, so this pins Godot too.
-LIBGODOT_REPO = "https://github.com/bahalafoundation/libgodot.git"
-LIBGODOT_REV = "01a14a06a9356f50e08838051f56df9cb70cfd54"
+# bahalafoundation/godot, whose `bahala` carries arcade's Godot fixes as commits (arcade#171):
+# the Godot the apple and android parts build. The name is the release's: libgodot is what
+# they build from it, with the iOS scripts in libgodot/ beside this file (arcade#438).
+GODOT_FORK_REPO = "https://github.com/bahalafoundation/godot.git"
+LIBGODOT_REV = "141aff6c3f13b6e074f3c6bcc3b325e770bb9c48"
 
-# Godot 4.5.1-stable, for the host editors: the libgodot fork does not build for linuxbsd.
+# Godot 4.5.1-stable, for the host editors: the godot fork does not build for linuxbsd.
 GODOT_VANILLA_REPO = "https://github.com/godotengine/godot.git"
 GODOT_VANILLA_REV = "f62fdbde15035c5576dad93e586201f4d41ef0cb"
 
@@ -62,14 +63,22 @@ GODOT_VANILLA_REV = "f62fdbde15035c5576dad93e586201f4d41ef0cb"
 # old release and builds nothing. A release's tag is also where arcade reads this script.
 #   libgodot      1 arcade#170 (no suffix)  2 arcade#177 Simulator slice  3 arcade#171
 #                 libgodot fork  4 arcade#261 debug symbols  5 arcade#436 this script
+#                 6 arcade#438 the godot fork directly, no libgodot fork
 #   host editors  1 arcade#169 (no suffix)  2 arcade#436 this script
-LIBGODOT_RECIPE = 5
+LIBGODOT_RECIPE = 6
 HOST_EDITORS_RECIPE = 2
 
 # Symbolicator's symsorter, from the release arcade's crash service runs (arcade#260), so
 # the layout it writes is the one that service reads.
 SYMSORTER_VERSION = "26.9.0"
 SYMSORTER_SHA256 = "8d7c591ac1894fbe65f2b22098068b7dedf85b7d39a982ddf58c725c5149486b"
+
+# libgodot's iOS build kit, from migeran/libgodot by way of bahalafoundation/libgodot at
+# 01a14a0 (arcade#438), unchanged: build_libgodot.sh, build_libgodot_xcframework.sh and the
+# Xcode project wrapping the static library as a framework. The scripts find godot/ and
+# write build/ beside themselves, so source copies them into the tree.
+LIBGODOT_KIT = pathlib.Path(__file__).resolve().parent / "libgodot"
+LIBGODOT_KIT_FILES = ["build_libgodot.sh", "build_libgodot_xcframework.sh", "libgodot_framework"]
 
 # This checkout. Godot names a module after its directory, and GodotJS the directory it
 # loads compiled JavaScript from after that, so it must be called `godotjs`.
@@ -180,28 +189,27 @@ def head(tree: pathlib.Path) -> str:
     return output(["git", "-C", tree, "rev-parse", "--verify", "-q", "HEAD"], check=False)
 
 
-def ensure_libgodot(tree: pathlib.Path) -> pathlib.Path:
-    """The libgodot fork at LIBGODOT_REV with every submodule; returns its godot/."""
-    if not (tree / ".git").exists():
-        run(["git", "clone", "-q", LIBGODOT_REPO, tree])
-    if head(tree) != LIBGODOT_REV:
-        if subprocess.run(["git", "-C", str(tree), "cat-file", "-e", f"{LIBGODOT_REV}^{{commit}}"]).returncode != 0:
-            run(["git", "-C", tree, "fetch", "-q", "origin"])
-        run(["git", "-C", tree, "checkout", "-q", LIBGODOT_REV])
-    run(["git", "-C", tree, "submodule", "update", "--init", "--recursive"])
-    return tree / "godot"
+def ensure_godot(godot: pathlib.Path, repo: str, rev: str) -> pathlib.Path:
+    """REPO at REV in GODOT, that commit only (scons reads nothing older)."""
+    if not (godot / ".git").exists():
+        godot.mkdir(parents=True, exist_ok=True)
+        run(["git", "-C", godot, "init", "-q"])
+        run(["git", "-C", godot, "remote", "add", "origin", repo])
+    if head(godot) != rev:
+        run(["git", "-C", godot, "fetch", "-q", "--depth", "1", "origin", rev])
+        run(["git", "-C", godot, "checkout", "-q", rev])
+    return godot
 
 
-def ensure_vanilla_godot(tree: pathlib.Path) -> pathlib.Path:
-    """Vanilla Godot at GODOT_VANILLA_REV, that commit only; the tree is godot/ itself."""
-    if not (tree / ".git").exists():
-        tree.mkdir(parents=True, exist_ok=True)
-        run(["git", "-C", tree, "init", "-q"])
-        run(["git", "-C", tree, "remote", "add", "origin", GODOT_VANILLA_REPO])
-    if head(tree) != GODOT_VANILLA_REV:
-        run(["git", "-C", tree, "fetch", "-q", "--depth", "1", "origin", GODOT_VANILLA_REV])
-        run(["git", "-C", tree, "checkout", "-q", GODOT_VANILLA_REV])
-    return tree
+def ensure_libgodot_kit(tree: pathlib.Path) -> None:
+    """libgodot's iOS build kit into TREE, beside godot/, where its scripts look. Copied over
+    on every run, so the tree's copy is this checkout's."""
+    for name in LIBGODOT_KIT_FILES:
+        src, dest = LIBGODOT_KIT / name, tree / name
+        if src.is_dir():
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, dest)
 
 
 def is_link(path: pathlib.Path) -> bool:
@@ -236,9 +244,10 @@ def source(part: str, tree: pathlib.Path) -> pathlib.Path:
     """The engine tree for PART with the module in place; returns its godot/ directory."""
     tree = tree.resolve()
     if part == "host":
-        godot = ensure_vanilla_godot(tree)
+        godot = ensure_godot(tree, GODOT_VANILLA_REPO, GODOT_VANILLA_REV)
     else:
-        godot = ensure_libgodot(tree)
+        godot = ensure_godot(tree / "godot", GODOT_FORK_REPO, LIBGODOT_REV)
+        ensure_libgodot_kit(tree)
         # Every scons run in the tree reads custom.py, the two inside build_libgodot.sh
         # included: GodotJS on JavaScriptCore, the system framework on Apple platforms
         # (arcade#44). The android part's use_quickjs_ng=yes overrides it.
@@ -332,7 +341,7 @@ def assert_render_view_lookup(so: pathlib.Path) -> None:
     """bahalafoundation/godot's getRenderView JNI lookup (arcade#72): without it
     get_godot_view() is null and the engine SIGSEGVs on its first frame on every device."""
     if b"getRenderView" not in so.read_bytes():
-        fail(f"{so.name}: no getRenderView JNI lookup (arcade#72); is LIBGODOT_REV's godot gitlink a commit with the fix?")
+        fail(f"{so.name}: no getRenderView JNI lookup (arcade#72); is LIBGODOT_REV a godot fork commit with the fix?")
     print(f"{so.name}: getRenderView JNI lookup present", flush=True)
 
 
@@ -394,13 +403,9 @@ Artifacts this notice covers
 
 Components, at the exact revisions built
   Godot Engine   https://github.com/bahalafoundation/godot  (branch `bahala`;
-                 fork of https://github.com/migeran/godot, carrying two Android
+                 fork of https://github.com/migeran/godot, carrying arcade's
                  fixes as commits — arcade#171)
                  {godot_rev}
-                 (the godot submodule of
-                 https://github.com/bahalafoundation/libgodot  (branch `bahala`;
-                 fork of https://github.com/migeran/libgodot, which carries build
-                 scripts only) at {libgodot_rev})
                  MIT, see godot-LICENSE.txt; third-party components bundled by
                  Godot itself: godot-COPYRIGHT.txt
   GodotJS        https://github.com/bahalafoundation/GodotJS  (branch `bahala`)
@@ -426,7 +431,7 @@ travel with the binaries.
 
 It is a HOST EDITOR for developing Arcade's Godot projects on Linux and Windows:
 vanilla Godot plus GodotJS on the QuickJS-NG backend. It is NOT the engine Arcade
-ships (that is the bahalafoundation/libgodot fork on JavaScriptCore), and it never exports a
+ships (that is the bahalafoundation/godot fork on JavaScriptCore), and it never exports a
 pack that ships.
 
 Components, at the exact revisions built
@@ -670,7 +675,7 @@ def stage_apple(tree: pathlib.Path, godot: pathlib.Path, xcf: pathlib.Path, stag
 
     licenses = editor_dir / "licenses"
     quickjs_rev = copy_licenses(godot, licenses)
-    notice = LIBGODOT_NOTICE.format(godot_rev=godot_rev, libgodot_rev=LIBGODOT_REV, godotjs_rev=rev, quickjs_rev=quickjs_rev, run_url=run_url())
+    notice = LIBGODOT_NOTICE.format(godot_rev=godot_rev, godotjs_rev=rev, quickjs_rev=quickjs_rev, run_url=run_url())
     write_text(editor_dir / "NOTICE.txt", notice)
 
     out.mkdir(parents=True, exist_ok=True)
@@ -812,7 +817,7 @@ def stage_host(godot: pathlib.Path, platform: str, stage: pathlib.Path, out: pat
     write_sha256(zip_path)
     write_text(out / f"{name}.stamp.json", stamp)
     print(f"{zip_path.name}: {zip_path.stat().st_size} bytes", flush=True)
-    print("NOT the engine that ships: vanilla Godot + QuickJS-NG, not the libgodot fork's JavaScriptCore build.", flush=True)
+    print("NOT the engine that ships: vanilla Godot + QuickJS-NG, not the godot fork's JavaScriptCore build.", flush=True)
 
 
 def smoke(args: argparse.Namespace) -> None:
