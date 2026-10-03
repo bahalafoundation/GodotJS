@@ -4,17 +4,15 @@ name: Bahala host editors
 # publishes them as a GitHub Release, so a Linux or Windows developer pulls an editor with
 # `just vendor` instead of compiling Godot for ~20 minutes (bahalafoundation/arcade#169).
 #
-# What is built: vanilla Godot at GODOT_VANILLA_REV (below) with this fork dropped in as
+# What is built: vanilla Godot at build.py's GODOT_VANILLA_REV with this fork linked in as
 # modules/godotjs, on the QuickJS-NG backend. Not the bahalafoundation/libgodot fork and not
 # JavaScriptCore: these editors run Arcade's City/Blip suites and renders; they are not
 # the engine Arcade ships and never export a pack that ships.
 #
-# Arcade's recipe for the same build (ci/build-libgodot.nu's Linux/Windows path, the
-# fallback for "nothing published yet") lives in the arcade repo, which is private, so it
-# is restated here rather than fetched: same scons flags, same staged names, same stamp.
-# The stamp {platform, godot_vanilla_rev, godotjs_rev} inside each zip is what keeps the
-# two honest: arcade's lint and ci/vendor.nu reject an editor whose stamp disagrees with
-# ci/build-libgodot.nu's GODOT_VANILLA_REV/GODOTJS_REV.
+# The recipe is .github/bahala/build.py's host part (arcade#436): the pin, the scons call,
+# the staging, the QuickJS-NG check, the stamp, the notices and the zip, and the smoke test
+# of each editor. Arcade's `just engine-build` on Linux and Windows runs the same script
+# from the commit this release's tag points at.
 #
 # Its sibling bahala-libgodot.yml publishes the engine arcade ships (the bahalafoundation/libgodot
 # fork: the iOS xcframework, the macOS editor and the Android .aar) the same way.
@@ -26,8 +24,9 @@ name: Bahala host editors
 #
 # Releases are IMMUTABLE here: arcade pins each zip by SHA-256, and a rebuild of the same
 # commits produces different bytes, so re-uploading would break every checkout pinned to
-# the old ones. If the release for this pair of commits exists, nothing is built. To
-# replace one, delete it (and its tag) by hand first.
+# the old ones. A release is named for the two commits and build.py's HOST_EDITORS_RECIPE;
+# if it exists, nothing is built. A change to the recipe that changes what's built bumps
+# HOST_EDITORS_RECIPE and so gets a new release.
 
 on:
   push:
@@ -42,10 +41,6 @@ permissions:
   contents: read
 
 env:
-  # Vanilla Godot 4.5.1-stable. Must equal GODOT_VANILLA_REV in arcade's
-  # ci/build-libgodot.nu: arcade's lint compares the release tag, and ci/vendor.nu the
-  # stamp, against it.
-  GODOT_VANILLA_REV: f62fdbde15035c5576dad93e586201f4d41ef0cb
   # Toolchain, pinned so a release can be rebuilt. node/python/scons match arcade's
   # mise.lock; pnpm is this repo's own `packageManager`.
   NODE_VERSION: 22.23.2
@@ -62,6 +57,8 @@ jobs:
     outputs:
       godotjs_rev: ${{ steps.plan.outputs.godotjs_rev }}
       tag: ${{ steps.plan.outputs.tag }}
+      godot_vanilla_rev: ${{ steps.plan.outputs.godot_vanilla_rev }}
+      recipe: ${{ steps.plan.outputs.recipe }}
       exists: ${{ steps.plan.outputs.exists }}
       publish: ${{ steps.plan.outputs.publish }}
     steps:
@@ -69,32 +66,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The GodotJS revision an editor is built from is the last commit that touched the
-      # module itself, not HEAD: this workflow's own commits (everything under .github/)
-      # change nothing that is compiled, and arcade pins GODOTJS_REV to a module commit.
-      # So a commit here that only edits .github/ maps to the same tag, finds the release
-      # already published, and builds nothing. The diff check proves the tree being built
-      # is that commit's module source byte for byte.
+      # The tag names the last commit that touched the module itself, not HEAD: this
+      # workflow's own commits (everything under .github/) change nothing that is compiled,
+      # so a commit that only edits .github/ maps to the same tag, finds the release
+      # already published, and builds nothing, unless it bumps the recipe version.
+      # build.py derives it, as it does for arcade.
       - name: Resolve the module revision and release tag
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rev=$(git log -1 --format=%H HEAD -- . ':(exclude).github')
-          git diff --quiet "$rev" HEAD -- . ':(exclude).github'
-          tag="editor-godot-${GODOT_VANILLA_REV:0:7}-godotjs-${rev:0:7}"
+          python3 .github/bahala/build.py plan --release host-editors | tee -a "$GITHUB_OUTPUT" > plan.env
+          tag=$(sed -n 's/^tag=//p' plan.env)
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exists=true; else exists=false; fi
           # Only `bahala` publishes. A dispatch on any other branch builds and smoke-tests
           # without releasing, which is how to try a change to this workflow.
           if [ "$GITHUB_REF" = "refs/heads/bahala" ]; then publish=true; else publish=false; fi
           {
-            echo "godotjs_rev=$rev"
-            echo "tag=$tag"
             echo "exists=$exists"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
-          echo "GodotJS module revision: $rev (HEAD is $GITHUB_SHA)"
+          cat plan.env
+          echo "HEAD is $GITHUB_SHA"
           echo "Release tag: $tag (exists: $exists, publish: $publish)"
           if [ "$exists" = true ]; then
             echo "::notice::$tag is already published; nothing to build (releases are immutable, see the header)"
@@ -117,8 +111,7 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 240
     env:
-      GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GODOT_VANILLA_REV: ${{ needs.plan.outputs.godot_vanilla_rev }}
       SCONS_CACHE: ${{ github.workspace }}/.scons-cache
       # Caches SCons' MSVC detection, which otherwise costs a minute per run (Godot's own CI).
       SCONS_CACHE_MSVC_CONFIG: "true"
@@ -126,21 +119,14 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check out vanilla Godot
+      # Named godotjs: build.py links it in as the module, and Godot names a module after
+      # its directory. Full history, for the module commit the stamp records.
+      - name: Check out GodotJS
         uses: actions/checkout@v7
         with:
-          repository: godotengine/godot
-          ref: ${{ env.GODOT_VANILLA_REV }}
-          path: godot
-
-      # modules/godotjs, lower case, as arcade's build lays it out: GodotJS names the
-      # directory compiled JavaScript is loaded from after the module's directory, and
-      # arcade's projects compile into .godot/godotjs.
-      - name: Check out GodotJS into modules/godotjs
-        uses: actions/checkout@v7
-        with:
-          path: godot/modules/godotjs
+          path: godotjs
           submodules: recursive
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
@@ -182,17 +168,9 @@ jobs:
             scons-${{ matrix.platform }}-${{ env.GODOT_VANILLA_REV }}-
             scons-${{ matrix.platform }}-
 
-      # Exactly arcade's build-linux-editor / build-windows-editor:
-      #   scons platform=<p> target=editor use_quickjs_ng=yes
-      # plus the cache, which does not change what is built. SCons finds MSVC itself.
-      - name: Build the editor
+      - name: Build, check and package
         id: build
-        working-directory: godot
-        run: |
-          jobs=$(python -c 'import os; print(os.cpu_count())')
-          scons platform=${{ matrix.platform }} target=editor use_quickjs_ng=yes \
-            "-j${jobs}" "cache_path=${SCONS_CACHE}" cache_limit=6
-          ls -l bin/
+        run: python godotjs/.github/bahala/build.py build --part host --tree godot --stage stage --out dist --scons-cache "$SCONS_CACHE"
 
       # Saved even when the build fails part-way: the objects that did compile still save
       # the next attempt their time.
@@ -204,17 +182,11 @@ jobs:
           path: ${{ env.SCONS_CACHE }}
           key: scons-${{ matrix.platform }}-${{ env.GODOT_VANILLA_REV }}-${{ github.sha }}
 
-      - name: Stage (as arcade's stage-${{ matrix.platform == 'windows' && 'windows' || 'linux' }}-artefacts does)
-        run: python godot/modules/godotjs/.github/bahala/host_editor.py stage --platform ${{ matrix.platform }} --godot godot --out stage
-
       - name: Smoke test (--version, GodotJS's tests/project on QuickJS-NG)
         run: |
-          # A copy, so the build tree's module stays pristine.
-          cp -r godot/modules/godotjs/tests/project smoke-project
-          python godot/modules/godotjs/.github/bahala/host_editor.py smoke --platform ${{ matrix.platform }} --stage stage --project smoke-project
-
-      - name: Package
-        run: python godot/modules/godotjs/.github/bahala/host_editor.py package --platform ${{ matrix.platform }} --stage stage --out dist
+          # A copy, so the checkout's test project stays pristine.
+          cp -r godotjs/tests/project smoke-project
+          python godotjs/.github/bahala/build.py smoke --stage stage --project smoke-project
 
       - uses: actions/upload-artifact@v7
         with:
@@ -234,6 +206,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.plan.outputs.tag }}
       GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
+      GODOT_VANILLA_REV: ${{ needs.plan.outputs.godot_vanilla_rev }}
+      HOST_EDITORS_RECIPE: ${{ needs.plan.outputs.recipe }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/download-artifact@v8
@@ -259,6 +233,7 @@ jobs:
             echo "| Godot | godotengine/godot@\`$GODOT_VANILLA_REV\` (4.5.1-stable) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
             echo "| Backend | QuickJS-NG (\`use_quickjs_ng=yes\`) |"
+            echo "| Recipe | $HOST_EDITORS_RECIPE (the tag's \`-r$HOST_EDITORS_RECIPE\`; .github/bahala/build.py at this tag, which arcade's \`just engine-build\` runs) |"
             echo "| Toolchain | Python $PYTHON_VERSION, SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION; Linux on ubuntu-22.04 (gcc), Windows on windows-2025 (MSVC) |"
             echo "| Built by | $RUN_URL |"
             echo
