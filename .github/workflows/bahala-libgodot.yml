@@ -327,7 +327,7 @@ jobs:
             echo "    sha256: $(sha libgodot-xcframework.zip)"
             echo "    unpack: xcframework"
             echo "  - name: libgodot-gdextension"
-            echo "    platforms: [ios]"
+            echo "    platforms: [ios, android]"
             echo "    version: 4.5.1"
             echo "    release: $base"
             echo "    artifact: libgodot-gdextension"
