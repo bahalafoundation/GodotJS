@@ -12,35 +12,27 @@ name: Bahala libgodot
 #   libgodot-symbols.zip           both engines' debug symbols, for arcade's crash
 #                                  reporting (arcade#260); not vendored, see below
 #
-# Debug symbols (arcade#261). Both engines are compiled with debug_symbols=yes. Their DWARF
-# (each iOS slice's dSYM, and the Android .so as scons linked it, before gradle strips it)
-# is sorted by Sentry's `symsorter -z` into Symbolicator's `unified` layout,
-# unified/<id[0:2]>/<id[2:]>/{debuginfo,executable} keyed by Mach-O UUID or ELF build id
-# and zstd-compressed, the tree arcade copies into R2 when its pin moves. Symbols can only
-# come from the run that publishes: -g changes code layout, so a build without it can never
-# be symbolicated, and a later rebuild runs on a different hosted Xcode. They stay out of
-# what arcade vendors: the xcframework carries no dSYMs and no debug map, and the .aar's
-# .so is stripped, so the pinned zips don't grow.
+# The recipe is .github/bahala/build.py (arcade#436): the pins, every scons and gradle
+# call, the staging, the byte-level checks and the packaging. This workflow is the
+# orchestration around it: runners, toolchains, the two halves in parallel, the artifacts,
+# the release. Arcade's `just engine-build` runs the same script from the commit a
+# release's tag points at, so a local build is this build.
+#
+# Debug symbols (arcade#261). The release's engines are compiled with debug_symbols=yes
+# (build.py --symbols). Their DWARF (each iOS slice's dSYM, and the Android .so as scons
+# linked it, before gradle strips it) is sorted by Sentry's `symsorter -z` into
+# Symbolicator's `unified` layout, unified/<id[0:2]>/<id[2:]>/{debuginfo,executable} keyed
+# by Mach-O UUID or ELF build id and zstd-compressed, the tree arcade copies into R2 when
+# its pin moves. Symbols can only come from the run that publishes: -g changes code layout,
+# so a build without it can never be symbolicated, and a later rebuild runs on a different
+# hosted Xcode. They stay out of what arcade vendors: the xcframework carries no dSYMs and
+# no debug map, and the .aar's .so is stripped, so the pinned zips don't grow.
 #
 # Sibling of bahala-host-editors.yml (#169), which publishes the Linux/Windows host editors
-# built from VANILLA Godot. This one builds the bahalafoundation/libgodot fork at
-# LIBGODOT_REV (below), with this fork dropped in as godot/modules/godotjs. It replaced
-# arcade's Gitea engine-build.yaml on macdaddy: GitHub-hosted macOS minutes are free on this
-# public repo, and it needs no credential beyond this workflow's own GITHUB_TOKEN.
-#
-# bahalafoundation/libgodot (arcade#171) is Bahala's own fork of migeran/libgodot, whose
-# `godot` submodule now points at bahalafoundation/godot, Bahala's fork of migeran/godot.
-# Both exist so the two Android fixes arcade used to apply as `.patch` files at build time
-# (a GLES3_ENABLED guard, and the getRenderView JNI lookup, #72) are ordinary commits on
-# bahalafoundation/godot's `bahala` branch instead — nothing is patched by this workflow,
-# or by arcade's local build, any more.
-#
-# Arcade's recipe for the same build (ci/build-libgodot.nu's macOS path, `just
-# engine-build`, the local fallback) lives in the arcade repo, which is private, so it is
-# restated here rather than fetched: same scons flags, same libgodot scripts, same staged
-# names, same byte-level asserts, same stamp. The stamp {rev, godotjs_rev} in the editor's
-# zip and the tag keep the two honest: arcade's lint and ci/vendor.nu reject a release
-# whose tag or stamp disagrees with ci/build-libgodot.nu's REV/GODOTJS_REV.
+# built from VANILLA Godot. This one builds the bahalafoundation/libgodot fork at build.py's
+# LIBGODOT_REV, with this fork linked in as godot/modules/godotjs. GitHub-hosted macOS
+# minutes are free on this public repo, and it needs no credential beyond this workflow's
+# own GITHUB_TOKEN.
 #
 # The runner is `xcode-27`: macOS 27 with Xcode 27.0 (27A266a), exactly what macdaddy runs
 # arcade's app builds with. It is a public-preview label; if it goes away or breaks,
@@ -52,8 +44,8 @@ name: Bahala libgodot
 # Releases are IMMUTABLE here: arcade pins each zip by SHA-256, and a rebuild of the same
 # commits produces different bytes (the xcframework is not reproducible bit-for-bit), so
 # re-uploading would break every checkout pinned to the old ones. A release is named for
-# what it was built from: the two commits and LIBGODOT_RECIPE (below), the version of
-# this recipe. If that release exists, nothing is built. A change to the recipe that
+# what it was built from: the two commits and build.py's LIBGODOT_RECIPE, the version of
+# the recipe. If that release exists, nothing is built. A change to the recipe that
 # changes what's built bumps LIBGODOT_RECIPE, and so gets a new release rather than
 # silently mapping onto the old one; a change that doesn't (a comment, the notes) leaves
 # it alone and builds nothing. All four artifacts come from one run or none: a failed
@@ -78,41 +70,12 @@ permissions:
   contents: read
 
 env:
-  # bahalafoundation/libgodot (arcade#171, Bahala's fork of migeran/libgodot) at arcade's
-  # ci/build-libgodot.nu REV. Its `godot` submodule is a gitlink inside this commit,
-  # pointing at bahalafoundation/godot, so this pins the Godot revision (and the two
-  # Android fixes committed there) too. Must equal arcade's REV: arcade's lint compares
-  # the release tag, and ci/vendor.nu the stamp, against it.
-  LIBGODOT_REV: 01a14a06a9356f50e08838051f56df9cb70cfd54
-  # The version of this recipe, the `-r<N>` at the end of the release tag. Bump it in any
-  # commit that changes what the build produces without moving LIBGODOT_REV or the module
-  # commit, or the plan job would find the old release and build nothing. Must equal
-  # arcade's LIBGODOT_RECIPE (ci/build-libgodot.nu), whose lint compares the tag.
-  #   1  arcade#170: the first release, tagged before this suffix existed
-  #      (libgodot-fdd3f46-godotjs-fc75c05)
-  #   2  arcade#177: the xcframework gains an ios-arm64-simulator slice
-  #   3  arcade#171: build from bahalafoundation/libgodot, whose `godot` submodule is
-  #      bahalafoundation/godot; the two Android fixes are commits there instead of
-  #      `.patch` files applied by this workflow (bahala/patches/ is deleted).
-  #      arcade#182 later moved LIBGODOT_REV twice more, without changing anything this
-  #      workflow does (REV alone already forces a new tag): first for a PackedFile copy
-  #      that turned out not to fix anything (reverted), then for the actual fix — a
-  #      missing null check on FileAccessPack's constructor's own FileAccess::open()
-  #      result, on bahalafoundation/godot's `bahala`.
-  #   4  arcade#261: both engines built with debug_symbols=yes, the xcframework without
-  #      dSYMs or debug map, and libgodot-symbols.zip
-  LIBGODOT_RECIPE: 4
   # Toolchain. node/python/scons match arcade's mise.lock; pnpm is this repo's own
   # `packageManager`. Java 17 and the Android SDK come from the runner image; the NDK,
   # platform and build-tools versions are read from the libgodot tree's config.gradle.
   NODE_VERSION: 22.23.2
   PNPM_VERSION: 10.11.0
   SCONS_VERSION: 4.11.1
-  # symsorter (getsentry/symbolicator's release asset, pinned by its SHA-256) from the
-  # Symbolicator release arcade's crash service is built on (arcade#260), so the layout it
-  # writes is the one that service reads.
-  SYMSORTER_VERSION: 26.9.0
-  SYMSORTER_SHA256: 8d7c591ac1894fbe65f2b22098068b7dedf85b7d39a982ddf58c725c5149486b
   PYTHONUNBUFFERED: "1"
 
 jobs:
@@ -122,6 +85,9 @@ jobs:
     outputs:
       godotjs_rev: ${{ steps.plan.outputs.godotjs_rev }}
       tag: ${{ steps.plan.outputs.tag }}
+      libgodot_rev: ${{ steps.plan.outputs.libgodot_rev }}
+      recipe: ${{ steps.plan.outputs.recipe }}
+      symsorter_version: ${{ steps.plan.outputs.symsorter_version }}
       exists: ${{ steps.plan.outputs.exists }}
       publish: ${{ steps.plan.outputs.publish }}
     steps:
@@ -129,30 +95,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      # As bahala-host-editors.yml: the build is named after the last commit outside
-      # .github/, so a commit that only touches CI files maps to the same tag, finds the
-      # release published, and builds nothing. Plus the recipe version, so one that
-      # changes what's built (and bumps LIBGODOT_RECIPE) maps to a new tag and builds.
+      # The tag names the last commit outside .github/ (so a commit that only touches CI
+      # files maps to the same tag, finds the release published, and builds nothing),
+      # LIBGODOT_REV and the recipe version (so one that changes what's built maps to a
+      # new tag and builds). build.py derives it, as it does for arcade.
       - name: Resolve the module revision and release tag
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rev=$(git log -1 --format=%H HEAD -- . ':(exclude).github')
-          git diff --quiet "$rev" HEAD -- . ':(exclude).github'
-          tag="libgodot-${LIBGODOT_REV:0:7}-godotjs-${rev:0:7}-r${LIBGODOT_RECIPE}"
+          python3 .github/bahala/build.py plan --release libgodot | tee -a "$GITHUB_OUTPUT" > plan.env
+          tag=$(sed -n 's/^tag=//p' plan.env)
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exists=true; else exists=false; fi
           # Only `bahala` publishes. A dispatch on any other branch builds and checks
           # without releasing, which is how to try a change to this workflow.
           if [ "$GITHUB_REF" = "refs/heads/bahala" ]; then publish=true; else publish=false; fi
           {
-            echo "godotjs_rev=$rev"
-            echo "tag=$tag"
             echo "exists=$exists"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
-          echo "GodotJS module revision: $rev (HEAD is $GITHUB_SHA)"
+          cat plan.env
+          echo "HEAD is $GITHUB_SHA"
           echo "Release tag: $tag (exists: $exists, publish: $publish)"
           if [ "$exists" = true ]; then
             echo "::notice::$tag is already published; nothing to build (releases are immutable, see the header)"
@@ -170,9 +134,6 @@ jobs:
         part: [apple, android]
     runs-on: ${{ inputs.runner || 'xcode-27' }}
     timeout-minutes: 180
-    env:
-      GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     defaults:
       run:
         shell: bash
@@ -181,31 +142,17 @@ jobs:
         run: |
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.logicalcpu hw.memsize
-          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version"
+          xcodebuild -version
           df -h "$GITHUB_WORKSPACE"
 
+      # Named godotjs: build.py links it in as the module, and Godot names a module after
+      # its directory. Full history, for the module commit the stamp records.
       - name: Check out GodotJS
         uses: actions/checkout@v7
         with:
           path: godotjs
           submodules: recursive
-
-      # arcade's ensure-libgodot + ensure-godotjs + write-custom-py. The module goes in as
-      # godot/modules/godotjs, lower case, as arcade lays it out (GodotJS names the
-      # directory compiled JavaScript loads from after the module's directory).
-      - name: Clone bahalafoundation/libgodot at LIBGODOT_REV and drop GodotJS in
-        run: |
-          set -euo pipefail
-          git clone -q https://github.com/bahalafoundation/libgodot.git libgodot
-          git -C libgodot checkout --quiet "$LIBGODOT_REV"
-          git -C libgodot submodule update --init --recursive
-          mv godotjs libgodot/godot/modules/godotjs
-          test -f libgodot/godot/modules/godotjs/jsb.h
-          # Every scons run in the tree reads custom.py: GodotJS on JavaScriptCore, the
-          # system framework on Apple platforms (arcade#44). The Android build overrides
-          # it with use_quickjs_ng=yes on its command line.
-          printf '# Written by bahala-libgodot.yml (arcade ci/build-libgodot.nu) - GodotJS on the JavaScriptCore backend (#44).\nuse_jsc = "yes"\n' > libgodot/godot/custom.py
-          echo "GODOT_REV=$(git -C libgodot/godot rev-parse HEAD)" >> "$GITHUB_ENV"
+          fetch-depth: 0
 
       - name: Install SCons
         run: |
@@ -223,218 +170,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      # ------------------------------------------------------------------ apple half ---
-
-      # Metal, not the default Vulkan build (which needs the Vulkan SDK). build_libgodot.sh
-      # below then finds this editor and skips its own host build.
-      - name: "Apple: host editor"
-        if: matrix.part == 'apple'
-        working-directory: libgodot/godot
-        run: |
-          set -euo pipefail
-          # arcade's link-javascriptcore: xcodebuild layers this file over every target it
-          # builds, the one hook onto the framework project's link line. And arcade's
-          # simulator-arm64-only (#177): the Simulator build of the framework wrapper
-          # would otherwise add an empty x86_64 stub and name the slice
-          # ios-arm64_x86_64-simulator; conditioned on the Simulator SDK, so the device
-          # build's settings are untouched.
-          # shellcheck disable=SC2016 # $(inherited) is xcconfig syntax, written literally
-          printf '// arcade ci/build-libgodot.nu - GodotJS JavaScriptCore backend (#44).\nOTHER_LDFLAGS = $(inherited) -framework JavaScriptCore\n// #177: the Simulator slice is arm64 only.\nARCHS[sdk=iphonesimulator*] = arm64\n' > "$RUNNER_TEMP/godotjs.xcconfig"
-          echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/godotjs.xcconfig" >> "$GITHUB_ENV"
-          scons p=macos target=editor dev_build=yes vulkan=no metal=yes "-j$(sysctl -n hw.logicalcpu)"
-
-      # Without --update-api on purpose: it would force the default (Vulkan) host rebuild.
-      # build_libgodot.sh dumps extension_api.json from the editor above instead. Apple's
-      # tools first on PATH: these scripts are written for macOS's BSD userland.
-      #
-      # The second build_libgodot.sh pass is the Simulator's library (arcade#177), and
-      # without --no-sim the xcframework wraps it as ios-arm64-simulator next to the
-      # device's ios-arm64. The app never ships that slice (Xcode embeds only the one
-      # matching the destination); it is what lets arcade boot the city on a Simulator.
-      # Ad-hoc signed, as arcade's sign-simulator-slice does: the app's Simulator builds
-      # are unsigned, so nothing else signs it, and the Simulator's dyld refuses to load
-      # an unsigned library (spike #176's first launch died on exactly that).
-      #
-      # Debug symbols (see the header): SCons prepends SCONSFLAGS to its command line, the
-      # only place SConstruct reads debug_symbols from (custom.py can't set it), and
-      # build_libgodot.sh passes no flags of its own through. Both passes' objects then
-      # carry DWARF, and the framework target's dwarf-with-dsym link makes a real dSYM per
-      # slice. The dSYMs leave the xcframework for libgodot-symbols.zip, and `strip -S`
-      # drops each binary's debug map (stabs naming the runner's object files, ~22 MB, read
-      # only by dsymutil, which has already run). Neither changes the Mach-O UUID the dSYM
-      # matches by. The slices are then re-wrapped without -debug-symbols, so Info.plist
-      # has no DebugSymbolsPath, as for any xcframework that ships no symbols: an app that
-      # embeds it gets no libgodot dSYM in its archive, so the app's own dSYM upload
-      # (arcade#263) can't put one under the engine's UUID next to the real one.
-      - name: "Apple: iOS library and xcframework"
-        if: matrix.part == 'apple'
-        working-directory: libgodot
-        env:
-          SCONSFLAGS: debug_symbols=yes
-        run: |
-          set -euo pipefail
-          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-          ./build_libgodot.sh --target ios
-          ./build_libgodot.sh --target ios --simulator
-          ./build_libgodot_xcframework.sh --target template_debug
-          xcf=build/libgodot/debug/libgodot.xcframework
-          sim=$xcf/ios-arm64-simulator/libgodot.framework
-          test -d "$sim" || { echo "no ios-arm64-simulator slice: found $(ls "$xcf")"; exit 1; }
-          for slice in ios-arm64 ios-arm64-simulator; do
-            dsym=$xcf/$slice/dSYMs/libgodot.framework.dSYM
-            test -d "$dsym" || { echo "no dSYM in $xcf/$slice"; exit 1; }
-            mkdir -p "$RUNNER_TEMP/symbols-in/$slice"
-            mv "$dsym" "$RUNNER_TEMP/symbols-in/$slice/"
-            bin=$xcf/$slice/libgodot.framework/libgodot
-            before=$(stat -f %z "$bin")
-            strip -S "$bin"
-            echo "$slice/libgodot: $before bytes, $(stat -f %z "$bin") without its debug map"
-          done
-          xcodebuild -create-xcframework \
-            -framework "$xcf/ios-arm64/libgodot.framework" \
-            -framework "$xcf/ios-arm64-simulator/libgodot.framework" \
-            -output "$RUNNER_TEMP/libgodot.xcframework"
-          rm -rf "$xcf"
-          mv "$RUNNER_TEMP/libgodot.xcframework" "$xcf"
-          codesign --force --sign - "$sim"
-          echo "signed $sim ad hoc"
-
-      # arcade's stage-artefacts and assert-jsc-only, then the notices and the stamp.
-      - name: "Apple: stage, check and package"
-        if: matrix.part == 'apple'
-        run: |
-          set -euo pipefail
-          src=libgodot
-          module=$src/godot/modules/godotjs
-          if [ ! -f "$src/build/gdextension/extension_api.json" ]; then
-            echo "no extension_api.json: the libgodot build scripts changed layout?"; exit 1
-          fi
-          xcf=$src/build/libgodot/debug/libgodot.xcframework
-          editor=stage/editor
-          mkdir -p "$editor/licenses" dist
-          cp "$src/godot/bin/godot.macos.editor.dev.arm64" "$editor/godot-editor"
-
-          # Exactly the two slices arcade expects (its assert-xcframework-slices), read from
-          # the xcframework's own Info.plist, the list Xcode resolves a destination against.
-          slices=$(plutil -extract AvailableLibraries json -o - "$xcf/Info.plist" | python3 -c 'import json,sys; print(" ".join(sorted(l["LibraryIdentifier"] for l in json.load(sys.stdin))))')
-          [ "$slices" = "ios-arm64 ios-arm64-simulator" ] || { echo "xcframework slices: '$slices', expected 'ios-arm64 ios-arm64-simulator'"; exit 1; }
-          echo "libgodot.xcframework: slices $slices"
-          sim="$xcf/ios-arm64-simulator/libgodot.framework"
-          codesign --verify "$sim"
-          codesign -dv "$sim" 2>&1 | grep -q '^Signature=adhoc$' || { echo "$sim is not ad-hoc signed"; exit 1; }
-          lipo -archs "$sim/libgodot" | grep -qx arm64 || { echo "$sim/libgodot is not arm64 only: $(lipo -archs "$sim/libgodot")"; exit 1; }
-          echo "ios-arm64-simulator: arm64 only, ad-hoc signed"
-
-          # Debug symbols (see the header): none inside the xcframework, and each slice's
-          # dSYM matches the binary that ships by UUID and holds the engine's DWARF (without
-          # debug_symbols=yes the link still makes a dSYM, with next to no __debug_info).
-          if [ -n "$(find "$xcf" -name '*.dSYM')" ] || grep -q DebugSymbolsPath "$xcf/Info.plist"; then
-            echo "$xcf still carries dSYMs or a DebugSymbolsPath"; exit 1
-          fi
-          mkdir -p symbols
-          : > symbols/apple.ids
-          for slice in ios-arm64 ios-arm64-simulator; do
-            bin=$xcf/$slice/libgodot.framework/libgodot
-            dwarf=$RUNNER_TEMP/symbols-in/$slice/libgodot.framework.dSYM/Contents/Resources/DWARF/libgodot
-            uuid=$(xcrun dwarfdump --uuid "$bin" | awk '{print $2}')
-            test -n "$uuid"
-            [ "$(xcrun dwarfdump --uuid "$dwarf" | awk '{print $2}')" = "$uuid" ] || { echo "$slice: the dSYM's UUID is not the binary's ($uuid)"; exit 1; }
-            oso=$(xcrun nm -ap "$bin" | grep -c ' OSO ' || true)
-            [ "$oso" = 0 ] || { echo "$bin still has a debug map ($oso object files)"; exit 1; }
-            hex=$(xcrun llvm-objdump --section-headers "$dwarf" | awk '$2 == "__debug_info" {print $3}')
-            info=$(( 16#${hex:-0} ))
-            [ "$info" -ge $(( 64 << 20 )) ] || { echo "$slice: the dSYM has only $info bytes of __debug_info"; exit 1; }
-            echo "$slice: UUID $uuid, binary $(stat -f %z "$bin") bytes, dSYM DWARF $(stat -f %z "$dwarf") bytes ($info of __debug_info)"
-            echo "$(tr -d - <<<"$uuid" | tr A-F a-f) $slice libgodot.framework" >> symbols/apple.ids
-          done
-
-          # JavaScriptCore and nothing else (arcade#44): its sources' paths are baked into
-          # the binary, QuickJS's and V8's names are wherever they are linked in. The
-          # Simulator slice is its own scons build, so it gets its own check.
-          for b in "$editor/godot-editor" "$xcf/ios-arm64/libgodot.framework/libgodot" "$sim/libgodot"; do
-            s=$(strings "$b")
-            grep -q 'impl/jsc/' <<<"$s" || { echo "$b was not built with GodotJS's JavaScriptCore backend"; exit 1; }
-            if grep -qiE 'quickjs|v8_monolith|v8::internal' <<<"$s"; then echo "$b links a JavaScript engine other than JavaScriptCore"; exit 1; fi
-            echo "$(basename "$b"): JavaScriptCore backend, no other JavaScript engine"
-          done
-
-          # It is the Godot we pinned: 4.5.1.stable.custom_build.<first 9 of the submodule>.
-          version=$("$editor/godot-editor" --version | tail -1 | tr -d '\r')
-          case "$version" in
-            4.5.1.stable.custom_build."${GODOT_REV:0:9}") echo "--version: $version" ;;
-            *) echo "--version printed '$version', expected 4.5.1.stable.custom_build.${GODOT_REV:0:9}"; exit 1 ;;
-          esac
-
-          # The stamp, byte for byte what arcade's stage-artefacts writes (nushell's
-          # `{rev, godotjs_rev} | to json`: two-space indent, no trailing newline).
-          printf '{\n  "rev": "%s",\n  "godotjs_rev": "%s"\n}' "$LIBGODOT_REV" "$GODOTJS_REV" > "$editor/.build-libgodot-pins.json"
-
-          # MIT permits redistributing the binaries only with the notices beside them.
-          lic=stage/licenses
-          mkdir -p "$lic"
-          cp "$src/godot/LICENSE.txt" "$lic/godot-LICENSE.txt"
-          cp "$src/godot/COPYRIGHT.txt" "$lic/godot-COPYRIGHT.txt"
-          cp "$module/LICENSE" "$lic/godotjs-LICENSE.txt"
-          cp "$module/quickjs-ng/LICENSE" "$lic/quickjs-ng-LICENSE.txt"
-          quickjs_rev=$(git -C "$module/quickjs-ng" rev-parse HEAD)
-          cat > stage/NOTICE.txt <<EOF
-          Arcade engine artifacts (bahalafoundation/arcade): copyright and licence notices
-          ===============================================================================
-
-          This release holds builds of open-source software, published by Bahala from its
-          fork of GodotJS. Every component below is MIT-licensed, which permits
-          redistribution in binary form but REQUIRES that this notice and the licence texts
-          beside it travel with the binaries. Nothing proprietary to Bahala is in them.
-
-          Artifacts this notice covers
-            libgodot-xcframework       the embeddable engine for iOS (GodotJS on JavaScriptCore),
-                                       device and Simulator slices
-            godot-editor-macos-arm64   the macOS arm64 host editor from the same build
-            godot-lib-android-aar      the embeddable engine for Android (GodotJS on QuickJS-NG)
-            libgodot-symbols           the debug symbols of the two embeddable engines above
-
-          Components, at the exact revisions built
-            Godot Engine   https://github.com/bahalafoundation/godot  (branch \`bahala\`;
-                           fork of https://github.com/migeran/godot, carrying two Android
-                           fixes as commits — arcade#171)
-                           ${GODOT_REV}
-                           (the godot submodule of
-                           https://github.com/bahalafoundation/libgodot  (branch \`bahala\`;
-                           fork of https://github.com/migeran/libgodot, which carries build
-                           scripts only) at ${LIBGODOT_REV})
-                           MIT, see godot-LICENSE.txt; third-party components bundled by
-                           Godot itself: godot-COPYRIGHT.txt
-            GodotJS        https://github.com/bahalafoundation/GodotJS  (branch \`bahala\`)
-                           ${GODOTJS_REV}
-                           MIT, see godotjs-LICENSE.txt
-            QuickJS-NG     https://github.com/quickjs-ng/quickjs  (in the Android .aar only)
-                           ${quickjs_rev}
-                           MIT, see quickjs-ng-LICENSE.txt
-
-          JavaScriptCore, GodotJS's engine on iOS and macOS, is linked as a system framework;
-          no part of it is redistributed here.
-
-          Built by ${RUN_URL}
-          EOF
-          cp stage/NOTICE.txt "$editor/NOTICE.txt"
-          cp "$lic"/* "$editor/licenses/"
-          cp stage/NOTICE.txt "$lic"/* dist/
-
-          # ditto archives a path's CONTENTS at the zip root, the layout arcade's
-          # ci/vendor.nu unpacks: the framework's own Info.plist/ios-arm64/... for the
-          # xcframework, and the editor directory for Vendor/godot-editor-macos-arm64/.
-          ditto -c -k --sequesterRsrc "$xcf" dist/libgodot-xcframework.zip
-          ditto -c -k --sequesterRsrc "$editor" dist/godot-editor-macos-arm64.zip
-          cp "$editor/.build-libgodot-pins.json" dist/godot-editor-macos-arm64.stamp.json
-          cp "$RUNNER_TEMP/xcode-version" dist/xcode-version.txt
-          cd dist
-          for z in libgodot-xcframework.zip godot-editor-macos-arm64.zip; do
-            shasum -a 256 "$z" > "$z.sha256"
-            cat "$z.sha256"
-          done
-          ls -l
-
-      # ---------------------------------------------------------------- android half ---
+      # Before the toolchain: the Android one is read from this tree's config.gradle.
+      - name: Engine source (bahalafoundation/libgodot at build.py's LIBGODOT_REV)
+        run: python3 godotjs/.github/bahala/build.py source --part ${{ matrix.part }} --tree libgodot
 
       - name: "Android: SDK platform, build-tools and NDK (from config.gradle)"
         if: matrix.part == 'android'
@@ -454,113 +192,10 @@ jobs:
           "$sdkmanager" --install platform-tools "platforms;android-$sdk" "build-tools;$bt" "ndk;$ndk" > /dev/null
           ls "$ANDROID_HOME/ndk"
 
-      # arcade's build-android-engine: this pin's Android backend needs opengl3=no and an
-      # empty angle_libs. The two Android fixes (a GLES3_ENABLED guard and the
-      # getRenderView JNI lookup, #72) are commits on bahalafoundation/godot's `bahala`
-      # branch (arcade#171), reached through LIBGODOT_REV's own `godot` gitlink — nothing
-      # to apply here any more.
-      #
-      # Debug symbols (see the header): debug_symbols=yes adds DWARF and drops the `-s` link
-      # flag. Gradle strips the copy it packages into the .aar (same build id, the size it
-      # always shipped at), so the copy saved here, before gradle, is the only one that
-      # keeps the DWARF.
-      - name: "Android: engine"
-        if: matrix.part == 'android'
-        working-directory: libgodot/godot
-        run: |
-          set -euo pipefail
-          scons platform=android arch=arm64 target=template_debug use_quickjs_ng=yes angle_libs="" opengl3=no debug_symbols=yes "-j$(sysctl -n hw.logicalcpu)"
-          mkdir -p "$RUNNER_TEMP/symbols-in/android"
-          cp platform/android/java/lib/libs/debug/arm64-v8a/libgodot_android.so "$RUNNER_TEMP/symbols-in/android/"
-
-      # arcade's patch-gradle-scons-args + build-android-template. The patch keeps the
-      # backend if gradle ever re-invokes scons itself (it doesn't on this path; the
-      # asserts below check the bytes either way).
-      - name: "Android: .aar"
-        if: matrix.part == 'android'
-        working-directory: libgodot/godot
+      - name: Build, check and package (${{ matrix.part }})
         env:
           GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process
-        run: |
-          set -euo pipefail
-          f=platform/android/java/lib/build.gradle
-          # shellcheck disable=SC2016 # ${selectedAbi} is Groovy, matched literally
-          anchor='"arch=${selectedAbi}", "-j"'
-          grep -qF "$anchor" "$f" || { echo "$f: scons args anchor not found; build.gradle changed shape?"; exit 1; }
-          python3 - "$f" <<'PY'
-          import sys
-          p = sys.argv[1]
-          t = open(p).read()
-          t = t.replace('"arch=${selectedAbi}", "-j"', '"arch=${selectedAbi}", "use_quickjs_ng=yes", "-j"')
-          open(p, "w").write(t)
-          PY
-          cd platform/android/java
-          ./gradlew generateGodotTemplates
-
-      # arcade's stage-and-verify-android-aar: QuickJS-NG and nothing else, the
-      # getRenderView JNI lookup (arcade#72), and 16 KB page alignment (Play requires it).
-      - name: "Android: check and package"
-        if: matrix.part == 'android'
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          aar=libgodot/godot/bin/godot-lib.template_debug.aar
-          so="$RUNNER_TEMP/libgodot_android.so"
-          unzip -p "$aar" jni/arm64-v8a/libgodot_android.so > "$so"
-          s=$(strings "$so")
-          grep -q 'impl/quickjs' <<<"$s" || { echo "no QuickJS-NG sources baked in"; exit 1; }
-          if grep -qiE 'v8_monolith|v8::internal|impl/jsc/' <<<"$s"; then echo "links a JavaScript engine other than QuickJS-NG"; exit 1; fi
-          echo "libgodot_android.so: QuickJS-NG backend, no other JavaScript engine"
-          grep -q getRenderView <<<"$s" || { echo "no getRenderView JNI lookup (arcade#72)"; exit 1; }
-          echo "libgodot_android.so: getRenderView JNI lookup present"
-          readelf=$(find "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt -path '*/bin/llvm-readelf' | head -1)
-          aligns=$("$readelf" -l "$so" | awk '$1 == "LOAD" {print $NF}' | sort -u)
-          test -n "$aligns"
-          [ "$aligns" = 0x4000 ] || { echo "LOAD segments align to: $aligns, not 0x4000 (16 KB)"; exit 1; }
-          echo "libgodot_android.so: all LOAD segments 16 KB (0x4000) aligned"
-          # Debug symbols (see the header): the saved copy matches the shipped one by build
-          # id and holds the DWARF; the shipped one holds none.
-          u=$RUNNER_TEMP/symbols-in/android/libgodot_android.so
-          buildid() { "$readelf" -n "$1" | awk '/Build ID:/ {print $3}'; }
-          dwarf() { "$readelf" -S -W "$1" | grep -c ' \.debug_info ' || true; }
-          id=$(buildid "$so")
-          test -n "$id"
-          [ "$(buildid "$u")" = "$id" ] || { echo "the saved .so's build id is not the shipped one's ($id)"; exit 1; }
-          [ "$(dwarf "$so")" = 0 ] || { echo "the shipped libgodot_android.so still carries DWARF"; exit 1; }
-          [ "$(dwarf "$u")" = 1 ] || { echo "the saved libgodot_android.so has no DWARF: did debug_symbols reach scons?"; exit 1; }
-          echo "libgodot_android.so: build id $id, $(stat -f %z "$so") bytes shipped, $(stat -f %z "$u") with DWARF"
-          mkdir -p symbols
-          echo "$id android-arm64-v8a libgodot_android.so" > symbols/android.ids
-          # The .aar keeps gradle's name, at the zip root (arcade's `unpack: aar`).
-          cp "$aar" "$RUNNER_TEMP/"
-          ditto -c -k --sequesterRsrc "$RUNNER_TEMP/godot-lib.template_debug.aar" dist/godot-lib-android-aar.zip
-          cd dist
-          shasum -a 256 godot-lib-android-aar.zip > godot-lib-android-aar.zip.sha256
-          cat godot-lib-android-aar.zip.sha256
-
-      # ------------------------------------------------------------------- both halves ---
-
-      # Each half sorts the symbols it kept into the `unified` layout (see the header), on
-      # the runner that has them: the sorted, zstd-compressed tree is a fraction of the
-      # raw ~2 GB. Every id that ships (<part>.ids, written by the checks above) must come
-      # out of it with an entry, and nothing else may.
-      - name: Sort the debug symbols
-        run: |
-          set -euo pipefail
-          ss=$RUNNER_TEMP/symsorter
-          curl -fsSL -o "$ss" "https://github.com/getsentry/symbolicator/releases/download/$SYMSORTER_VERSION/symsorter-Darwin-universal"
-          echo "$SYMSORTER_SHA256  $ss" | shasum -a 256 -c -
-          chmod +x "$ss"
-          "$ss" -z -p unified -o symbols "$RUNNER_TEMP/symbols-in"
-          ids=symbols/${{ matrix.part }}.ids
-          while read -r id what file; do
-            d=symbols/unified/${id:0:2}/${id:2}
-            [ -f "$d/debuginfo" ] || [ -f "$d/executable" ] || { echo "nothing sorted for $what's $file ($id)"; exit 1; }
-            echo "$what $file: $id"
-          done < "$ids"
-          sorted=$(find symbols/unified -type f ! -name '*.meta' | wc -l | tr -d ' ')
-          [ "$sorted" = "$(wc -l < "$ids" | tr -d ' ')" ] || { echo "$sorted files sorted for $(wc -l < "$ids" | tr -d ' ') ids"; exit 1; }
-          find symbols/unified -type f ! -name '*.meta' -exec stat -f '%z bytes  %N' {} +
+        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree libgodot --stage stage --out dist --symbols symbols
 
       - uses: actions/upload-artifact@v7
         with:
@@ -587,6 +222,11 @@ jobs:
     if: needs.plan.outputs.exists != 'true'
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
+        with:
+          path: godotjs
+          sparse-checkout: .github/bahala
+
       - uses: actions/download-artifact@v8
         with:
           pattern: symbols-*
@@ -594,22 +234,7 @@ jobs:
           path: symbols
 
       - name: Zip libgodot-symbols.zip
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cd symbols
-          # Stored, not deflated: every file in it is already zstd (or a few bytes of .meta).
-          zip -q -r -0 -X ../dist/libgodot-symbols.zip unified
-          cat apple.ids android.ids > ../dist/libgodot-symbols.ids
-          cd ../dist
-          test "$(wc -l < libgodot-symbols.ids)" -eq 3
-          size=$(stat -c %s libgodot-symbols.zip)
-          # GitHub refuses a release asset of 2 GiB or more.
-          [ "$size" -lt $(( 2 << 30 )) ] || { echo "libgodot-symbols.zip is $size bytes, over GitHub's 2 GiB asset limit"; exit 1; }
-          unzip -l libgodot-symbols.zip
-          sha256sum libgodot-symbols.zip > libgodot-symbols.zip.sha256
-          cat libgodot-symbols.ids libgodot-symbols.zip.sha256
-          echo "libgodot-symbols.zip: $size bytes"
+        run: python3 godotjs/.github/bahala/build.py symbols --symbols symbols --out dist
 
       - uses: actions/upload-artifact@v7
         with:
@@ -630,6 +255,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.plan.outputs.tag }}
       GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
+      LIBGODOT_REV: ${{ needs.plan.outputs.libgodot_rev }}
+      LIBGODOT_RECIPE: ${{ needs.plan.outputs.recipe }}
+      SYMSORTER_VERSION: ${{ needs.plan.outputs.symsorter_version }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/download-artifact@v8
@@ -653,7 +281,7 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| libgodot | bahalafoundation/libgodot@\`$LIBGODOT_REV\` (fork of migeran/libgodot; Godot 4.5.1 from bahalafoundation/godot, arcade#171) |"
-            echo "| Recipe | $LIBGODOT_RECIPE (the tag's \`-r$LIBGODOT_RECIPE\`; see LIBGODOT_RECIPE in bahala-libgodot.yml) |"
+            echo "| Recipe | $LIBGODOT_RECIPE (the tag's \`-r$LIBGODOT_RECIPE\`; .github/bahala/build.py at this tag, which arcade's \`just engine-build\` runs) |"
             echo "| xcframework | \`ios-arm64\` (device, what ships) + \`ios-arm64-simulator\` (arm64, ad-hoc signed, arcade#177) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
             echo "| Backends | JavaScriptCore (iOS xcframework, macOS editor); QuickJS-NG (Android .aar) |"
@@ -718,7 +346,8 @@ jobs:
       # `workflows` permission, so GitHub refuses (403 "Resource not accessible by
       # integration") a new tag whose tree carries workflow files the default branch
       # doesn't, which an older module commit's tree can: fc75c05's carried the #170 spike.
-      # $GITHUB_SHA is `bahala`'s head at push time, so its workflows are the branch's own.
+      # $GITHUB_SHA is `bahala`'s head at push time, so its workflows are the branch's own,
+      # and its build.py is the recipe arcade's `just engine-build` checks out by this tag.
       - name: Create the release
         run: |
           set -euo pipefail
