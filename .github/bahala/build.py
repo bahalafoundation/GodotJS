@@ -25,9 +25,8 @@ Parts:
     apple    macOS: the iOS xcframework (device and arm64 Simulator slices), GodotJS on
              JavaScriptCore, and the extension_api.json it is bound by, from the godot fork
     android  macOS: the Android .aar, GodotJS on QuickJS-NG, from the vanilla tree
-    host     this OS's editor, from the vanilla tree: macOS on JavaScriptCore (it exports
-             the packs both apps ship), Linux and Windows on QuickJS-NG (they run arcade's
-             suites and never export a pack that ships)
+    host     this OS's editor, from the vanilla tree: macOS on JavaScriptCore, as iOS
+             runs; Linux and Windows on QuickJS-NG, as Android runs
 
 Only iOS needs the fork's LibGodot patches; everything else builds from one vanilla tree,
 so the editors and the .aar are the same Godot (arcade#439).
@@ -474,8 +473,8 @@ Built by {run_url}
 """
 
 HOST_ROLE = {
-    "jsc": "It exports the packs Arcade's apps ship, and runs them on JavaScriptCore, as iOS\ndoes.",
-    "quickjs": "It runs Arcade's suites and renders, and never exports a pack that ships.",
+    "jsc": "The backend Arcade's iOS app runs.",
+    "quickjs": "The backend Arcade's Android app runs.",
 }
 
 # The component the backend adds: QuickJS-NG is compiled in; JavaScriptCore is linked as a
@@ -568,8 +567,9 @@ def symbols_command(args: argparse.Namespace) -> None:
 
 
 def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None) -> pathlib.Path:
-    """The macOS editor, then the iOS library for device and Simulator, wrapped as one
-    xcframework without its dSYMs; returns the xcframework."""
+    """The fork's macOS editor, only to dump extension_api.json, then the iOS library for
+    device and Simulator, wrapped as one xcframework without its dSYMs; returns the
+    xcframework."""
     env = dict(os.environ)
     # xcodebuild layers this over every target it builds, the one hook onto the framework
     # wrapper's link line: JavaScriptCore, and an arm64-only Simulator slice (arcade#177),

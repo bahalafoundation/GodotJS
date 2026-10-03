@@ -6,9 +6,9 @@ name: Bahala host editors
 #
 # What is built: the vanilla tree at build.py's GODOT_VANILLA_REV (Godot 4.5.1-stable plus
 # arcade's fixes), the one the Android .aar builds from too, with this fork linked in as
-# modules/godotjs. The macOS editor runs GodotJS on JavaScriptCore, as iOS does, and
-# exports the packs both apps ship; the Linux and Windows ones run it on QuickJS-NG, run
-# Arcade's City/Blip suites and renders, and never export a pack that ships.
+# modules/godotjs. The macOS editor runs GodotJS on JavaScriptCore, as iOS does; the
+# Linux and Windows ones run it on QuickJS-NG, as Android does. A pack carries tsc's
+# JavaScript, not backend bytecode, so any of them can export one.
 #
 # The recipe is .github/bahala/build.py's host part (arcade#436): the pin, the scons call,
 # the staging, the backend check, the stamp, the notices and the zip, and the smoke test
@@ -240,7 +240,7 @@ jobs:
           {
             echo "GodotJS host editors for [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) (#169, #439): the vanilla tree (Godot 4.5.1-stable + arcade's fixes), the one its Android engine builds from, + this fork's GodotJS."
             echo
-            echo "The **macOS** editor runs GodotJS on JavaScriptCore, as iOS does, and exports the packs both apps ship. The **Linux and Windows** editors run it on QuickJS-NG; they run the City/Blip suites and renders, and never export a pack that ships."
+            echo "The **macOS** editor runs GodotJS on JavaScriptCore, as iOS does. The **Linux and Windows** editors run it on QuickJS-NG, as Android does. A pack carries tsc's JavaScript, not backend bytecode, so any of them can export one."
             echo
             echo "| | |"
             echo "|---|---|"
@@ -304,7 +304,7 @@ jobs:
           cd dist
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Host editors: Godot ${GODOT_VANILLA_REV:0:7} + GodotJS ${GODOTJS_REV:0:7} (QuickJS-NG)" \
+            --title "Host editors: Godot ${GODOT_VANILLA_REV:0:7} + GodotJS ${GODOTJS_REV:0:7}" \
             --notes-file notes.md \
             --latest=false \
             godot-editor-*.zip SHA256SUMS
