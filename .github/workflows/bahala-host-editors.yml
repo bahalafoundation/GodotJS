@@ -1,21 +1,22 @@
 name: Bahala host editors
 
-# Builds the Linux and Windows GodotJS host editors bahalafoundation/arcade vendors, and
-# publishes them as a GitHub Release, so a Linux or Windows developer pulls an editor with
-# `just vendor` instead of compiling Godot for ~20 minutes (bahalafoundation/arcade#169).
+# Builds the macOS, Linux and Windows GodotJS host editors bahalafoundation/arcade vendors,
+# and publishes them as a GitHub Release, so a developer pulls an editor with `just vendor`
+# instead of compiling Godot for ~20 minutes (bahalafoundation/arcade#169, #439).
 #
-# What is built: vanilla Godot at build.py's GODOT_VANILLA_REV with this fork linked in as
-# modules/godotjs, on the QuickJS-NG backend. Not the bahalafoundation/godot fork and not
-# JavaScriptCore: these editors run Arcade's City/Blip suites and renders; they are not
-# the engine Arcade ships and never export a pack that ships.
+# What is built: the vanilla tree at build.py's GODOT_VANILLA_REV (Godot 4.5.1-stable plus
+# arcade's fixes), the one the Android .aar builds from too, with this fork linked in as
+# modules/godotjs. The macOS editor runs GodotJS on JavaScriptCore, as iOS does, and
+# exports the packs both apps ship; the Linux and Windows ones run it on QuickJS-NG, run
+# Arcade's City/Blip suites and renders, and never export a pack that ships.
 #
 # The recipe is .github/bahala/build.py's host part (arcade#436): the pin, the scons call,
-# the staging, the QuickJS-NG check, the stamp, the notices and the zip, and the smoke test
-# of each editor. Arcade's `just engine-build` on Linux and Windows runs the same script
-# from the commit this release's tag points at.
+# the staging, the backend check, the stamp, the notices and the zip, and the smoke test
+# of each editor. Arcade's `just engine-build` runs the same script from the commit this
+# release's tag points at.
 #
-# Its sibling bahala-libgodot.yml publishes the engine arcade ships (the bahalafoundation/godot
-# fork: the iOS xcframework, the macOS editor and the Android .aar) the same way.
+# Its sibling bahala-libgodot.yml publishes the engines arcade ships (the iOS xcframework
+# from the bahalafoundation/godot fork, the Android .aar from this tree) the same way.
 #
 # Upstream's own workflows (runner.yml and the build_* it calls) are disabled on this fork
 # in the repository's Actions settings (`gh workflow disable`), not edited, so they stay
@@ -32,6 +33,12 @@ on:
   push:
     branches: [bahala]
   workflow_dispatch:
+    inputs:
+      macos_runner:
+        description: Hosted macOS runner label for the macOS editor (xcode-27; macos-26 is the fallback, as in bahala-libgodot.yml)
+        default: xcode-27
+        type: choice
+        options: [xcode-27, macos-26]
 
 concurrency:
   group: bahala-host-editors
@@ -108,7 +115,10 @@ jobs:
             runs-on: ubuntu-22.04
           - platform: windows
             runs-on: windows-2025
-    runs-on: ${{ matrix.runs-on }}
+          # The Xcode arcade's app builds with (bahala-libgodot.yml's header).
+          - platform: macos
+            runs-on: xcode-27
+    runs-on: ${{ matrix.platform == 'macos' && inputs.macos_runner || matrix.runs-on }}
     timeout-minutes: 240
     env:
       GODOT_VANILLA_REV: ${{ needs.plan.outputs.godot_vanilla_rev }}
@@ -182,7 +192,11 @@ jobs:
           path: ${{ env.SCONS_CACHE }}
           key: scons-${{ matrix.platform }}-${{ env.GODOT_VANILLA_REV }}-${{ github.sha }}
 
-      - name: Smoke test (--version, GodotJS's tests/project on QuickJS-NG)
+      - name: "macOS: record the Xcode"
+        if: matrix.platform == 'macos'
+        run: xcodebuild -version > dist/xcode-version.txt
+
+      - name: Smoke test (--version, GodotJS's tests/project on the editor's backend)
         run: |
           # A copy, so the checkout's test project stays pristine.
           cp -r godotjs/tests/project smoke-project
@@ -224,17 +238,17 @@ jobs:
           sha256sum -c SHA256SUMS
           base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
           {
-            echo "GodotJS host editors for [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) (#169): vanilla Godot 4.5.1-stable + this fork's GodotJS on **QuickJS-NG**."
+            echo "GodotJS host editors for [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) (#169, #439): the vanilla tree (Godot 4.5.1-stable + arcade's fixes), the one its Android engine builds from, + this fork's GodotJS."
             echo
-            echo "**Not the engine Arcade ships** (that is the bahalafoundation/godot fork on JavaScriptCore). These run the City/Blip suites and renders on Linux and Windows, and never export a pack that ships."
+            echo "The **macOS** editor runs GodotJS on JavaScriptCore, as iOS does, and exports the packs both apps ship. The **Linux and Windows** editors run it on QuickJS-NG; they run the City/Blip suites and renders, and never export a pack that ships."
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| Godot | godotengine/godot@\`$GODOT_VANILLA_REV\` (4.5.1-stable) |"
+            echo "| Godot | bahalafoundation/godot@\`$GODOT_VANILLA_REV\` (\`vanilla\`: 4.5.1-stable + arcade's fixes) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
-            echo "| Backend | QuickJS-NG (\`use_quickjs_ng=yes\`) |"
+            echo "| Backends | JavaScriptCore on macOS (\`use_jsc=yes\`, Metal); QuickJS-NG on Linux and Windows (\`use_quickjs_ng=yes\`) |"
             echo "| Recipe | $HOST_EDITORS_RECIPE (the tag's \`-r$HOST_EDITORS_RECIPE\`; .github/bahala/build.py at this tag, which arcade's \`just engine-build\` runs) |"
-            echo "| Toolchain | Python $PYTHON_VERSION, SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION; Linux on ubuntu-22.04 (gcc), Windows on windows-2025 (MSVC) |"
+            echo "| Toolchain | Python $PYTHON_VERSION, SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION; macOS on $(head -1 xcode-version.txt) ($(tail -1 xcode-version.txt)), Linux on ubuntu-22.04 (gcc), Windows on windows-2025 (MSVC) |"
             echo "| Built by | $RUN_URL |"
             echo
             echo "## SHA-256"
@@ -260,8 +274,11 @@ jobs:
               name="${z%.zip}"
               host="${name#godot-editor-}"
               sha=$(awk -v f="$z" '$2 == f { print $1 }' SHA256SUMS)
+              # The macOS editor exports the packs: every pipeline that ships one needs it.
+              platforms="[editor]"
+              if [ "$host" = macos-arm64 ]; then platforms="[editor, ios, android, content]"; fi
               echo "  - name: $name"
-              echo "    platforms: [editor]"
+              echo "    platforms: $platforms"
               echo "    host: $host"
               echo "    version: 4.5.1"
               echo "    release: $base"
