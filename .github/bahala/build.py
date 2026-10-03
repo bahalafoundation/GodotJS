@@ -22,14 +22,18 @@ of what is built: arcade pins a release, by tag and SHA-256, and nothing else.
         The apple and android parts' sorted symbols, as libgodot-symbols.zip.
 
 Parts:
-    apple    macOS: the iOS xcframework (device and arm64 Simulator slices) and the macOS
-             arm64 editor, from the godot fork, GodotJS on JavaScriptCore
-    android  macOS: the Android .aar, from the same tree, GodotJS on QuickJS-NG
-    host     Linux or Windows: this OS's editor, vanilla Godot plus GodotJS on QuickJS-NG.
-             Not the engine that ships: it runs arcade's suites and never exports a pack.
+    apple    macOS: the iOS xcframework (device and arm64 Simulator slices), GodotJS on
+             JavaScriptCore, and the extension_api.json it is bound by, from the godot fork
+    android  macOS: the Android .aar, GodotJS on QuickJS-NG, from the vanilla tree
+    host     this OS's editor, from the vanilla tree: macOS on JavaScriptCore, as iOS
+             runs; Linux and Windows on QuickJS-NG, as Android runs
 
-Needs git, scons, node and pnpm on PATH; the apple and android parts need Xcode, and the
-android part a JDK 17 and an Android SDK with config.gradle's versions (ANDROID_HOME).
+Only iOS needs the fork's LibGodot patches; everything else builds from one vanilla tree,
+so the editors and the .aar are the same Godot (arcade#439).
+
+Needs git, scons, node and pnpm on PATH; the apple part and the macOS editor need Xcode,
+and the android part a JDK 17 and an Android SDK with config.gradle's versions
+(ANDROID_HOME).
 Python 3.9 or later, standard library only.
 """
 
@@ -48,15 +52,20 @@ import sys
 import tempfile
 import zipfile
 
-# bahalafoundation/godot, whose `bahala` carries arcade's Godot fixes as commits (arcade#171):
-# the Godot the apple and android parts build. The name is the release's: libgodot is what
-# they build from it, with the iOS scripts in libgodot/ beside this file (arcade#438).
+# bahalafoundation/godot's `bahala` (a fork of migeran/godot, carrying arcade's fixes as
+# commits, arcade#171): the Godot the apple part builds, for its LibGodot patches
+# (RenderingNativeSurfaceApple, DisplayServerEmbedded), which only iOS needs. The name is
+# the release's: libgodot is what it builds, with the iOS scripts in libgodot/ beside this
+# file (arcade#438).
 GODOT_FORK_REPO = "https://github.com/bahalafoundation/godot.git"
 LIBGODOT_REV = "141aff6c3f13b6e074f3c6bcc3b325e770bb9c48"
 
-# Godot 4.5.1-stable, for the host editors: the godot fork does not build for linuxbsd.
-GODOT_VANILLA_REPO = "https://github.com/godotengine/godot.git"
-GODOT_VANILLA_REV = "f62fdbde15035c5576dad93e586201f4d41ef0cb"
+# The vanilla tree, for the Android .aar and all three host editors (arcade#439): Godot
+# 4.5.1-stable (f62fdbde) plus one commit, the #182 null check in FileAccessPack, which
+# upstream has only from 4.7 (6103c0bc). It lives on bahalafoundation/godot's `vanilla`
+# branch, beside `bahala`, and like it is append-only.
+GODOT_VANILLA_REPO = "https://github.com/bahalafoundation/godot.git"
+GODOT_VANILLA_REV = "2f5ed26f5e6aae195b3238607e91fa643e22afd3"
 
 # Each release tag ends in its recipe version, `-r<N>`. Bump it in the commit that changes
 # what that release holds without moving a pin or the module commit, or the plan finds the
@@ -64,9 +73,12 @@ GODOT_VANILLA_REV = "f62fdbde15035c5576dad93e586201f4d41ef0cb"
 #   libgodot      1 arcade#170 (no suffix)  2 arcade#177 Simulator slice  3 arcade#171
 #                 libgodot fork  4 arcade#261 debug symbols  5 arcade#436 this script
 #                 6 arcade#438 the godot fork directly, no libgodot fork
+#                 7 arcade#439 the .aar from the vanilla tree, extension_api.json
+#                   published, the macOS editor moved to the host editors
 #   host editors  1 arcade#169 (no suffix)  2 arcade#436 this script
-LIBGODOT_RECIPE = 6
-HOST_EDITORS_RECIPE = 2
+#                 3 arcade#439 the macOS editor, the vanilla tree with the #182 fix
+LIBGODOT_RECIPE = 7
+HOST_EDITORS_RECIPE = 3
 
 # Symbolicator's symsorter, from the release arcade's crash service runs (arcade#260), so
 # the layout it writes is the one that service reads.
@@ -86,17 +98,30 @@ GODOTJS = pathlib.Path(__file__).resolve().parents[2]
 
 XCFRAMEWORK_SLICES = ["ios-arm64", "ios-arm64-simulator"]
 STAMP = ".build-libgodot-pins.json"
-MACOS_EDITOR = "godot-editor-macos-arm64"
+GDEXTENSION = "libgodot-gdextension"
 AAR = "godot-lib.template_debug.aar"
 
 # Built binary under godot/bin -> staged name. Windows' console wrapper launches the
 # executable named like itself minus `.console`, so it is staged under the matching name.
+# The backend is GodotJS's: JavaScriptCore on macOS, so the editor that exports the packs
+# runs them on the engine iOS ships (arcade#44); QuickJS-NG, Android's, elsewhere.
 HOSTS = {
+    "macos": {
+        "host": "macos-arm64",
+        "bins": {"godot.macos.editor.arm64": "godot-editor"},
+        "engine": "godot-editor",
+        "run": "godot-editor",
+        "backend": "jsc",
+        # Metal, not the default Vulkan, which needs the Vulkan SDK.
+        "flags": ["use_jsc=yes", "vulkan=no", "metal=yes"],
+    },
     "linuxbsd": {
         "host": "linux-x86_64",
         "bins": {"godot.linuxbsd.editor.x86_64": "godot-editor"},
         "engine": "godot-editor",
         "run": "godot-editor",
+        "backend": "quickjs",
+        "flags": ["use_quickjs_ng=yes"],
     },
     "windows": {
         "host": "windows-x86_64",
@@ -107,6 +132,8 @@ HOSTS = {
         # The console wrapper holds no engine, so only the .exe is checked.
         "engine": "godot-editor.exe",
         "run": "godot-editor.console.exe",
+        "backend": "quickjs",
+        "flags": ["use_quickjs_ng=yes"],
     },
 }
 
@@ -167,7 +194,8 @@ def godotjs_rev() -> str:
 
 def release_tag(release: str, rev: str) -> str:
     if release == "libgodot":
-        return f"libgodot-{LIBGODOT_REV[:7]}-godotjs-{rev[:7]}-r{LIBGODOT_RECIPE}"
+        # Both Godots: the xcframework is the fork's, the .aar the vanilla tree's.
+        return f"libgodot-{LIBGODOT_REV[:7]}-godot-{GODOT_VANILLA_REV[:7]}-godotjs-{rev[:7]}-r{LIBGODOT_RECIPE}"
     return f"editor-godot-{GODOT_VANILLA_REV[:7]}-godotjs-{rev[:7]}-r{HOST_EDITORS_RECIPE}"
 
 
@@ -175,7 +203,7 @@ def plan(args: argparse.Namespace) -> None:
     rev = godotjs_rev()
     lines = {"tag": release_tag(args.release, rev), "godotjs_rev": rev}
     if args.release == "libgodot":
-        lines.update(libgodot_rev=LIBGODOT_REV, recipe=LIBGODOT_RECIPE, symsorter_version=SYMSORTER_VERSION)
+        lines.update(libgodot_rev=LIBGODOT_REV, godot_vanilla_rev=GODOT_VANILLA_REV, recipe=LIBGODOT_RECIPE, symsorter_version=SYMSORTER_VERSION)
     else:
         lines.update(godot_vanilla_rev=GODOT_VANILLA_REV, recipe=HOST_EDITORS_RECIPE)
     for key, value in lines.items():
@@ -241,16 +269,19 @@ def link_module(godot: pathlib.Path) -> None:
 
 
 def source(part: str, tree: pathlib.Path) -> pathlib.Path:
-    """The engine tree for PART with the module in place; returns its godot/ directory."""
+    """The engine tree for PART with the module in place; returns its Godot directory: TREE
+    itself for the vanilla tree (android, host), TREE/godot for the fork's (apple), which
+    libgodot's scripts expect beside them. The android and host parts share one vanilla
+    tree; no custom.py there, each passes its backend to scons."""
     tree = tree.resolve()
-    if part == "host":
+    if part in ("android", "host"):
         godot = ensure_godot(tree, GODOT_VANILLA_REPO, GODOT_VANILLA_REV)
     else:
         godot = ensure_godot(tree / "godot", GODOT_FORK_REPO, LIBGODOT_REV)
         ensure_libgodot_kit(tree)
         # Every scons run in the tree reads custom.py, the two inside build_libgodot.sh
         # included: GodotJS on JavaScriptCore, the system framework on Apple platforms
-        # (arcade#44). The android part's use_quickjs_ng=yes overrides it.
+        # (arcade#44).
         write_text(godot / "custom.py", '# Written by .github/bahala/build.py - GodotJS on the JavaScriptCore backend (#44).\nuse_jsc = "yes"\n')
     link_module(godot)
     return godot
@@ -337,14 +368,6 @@ def assert_16kb_aligned(so: pathlib.Path) -> None:
     print(f"{so.name}: all LOAD segments 16 KB (0x4000) aligned", flush=True)
 
 
-def assert_render_view_lookup(so: pathlib.Path) -> None:
-    """bahalafoundation/godot's getRenderView JNI lookup (arcade#72): without it
-    get_godot_view() is null and the engine SIGSEGVs on its first frame on every device."""
-    if b"getRenderView" not in so.read_bytes():
-        fail(f"{so.name}: no getRenderView JNI lookup (arcade#72); is LIBGODOT_REV a godot fork commit with the fix?")
-    print(f"{so.name}: getRenderView JNI lookup present", flush=True)
-
-
 def godot_version(editor: pathlib.Path, cwd: pathlib.Path | None = None) -> str:
     out = output([editor, "--version"], cwd=cwd)
     return out.splitlines()[-1].strip() if out else ""
@@ -397,15 +420,18 @@ beside it travel with the binaries. Nothing proprietary to Bahala is in them.
 Artifacts this notice covers
   libgodot-xcframework       the embeddable engine for iOS (GodotJS on JavaScriptCore),
                              device and Simulator slices
-  godot-editor-macos-arm64   the macOS arm64 host editor from the same build
+  libgodot-gdextension       the iOS engine's extension_api.json and headers
   godot-lib-android-aar      the embeddable engine for Android (GodotJS on QuickJS-NG)
   libgodot-symbols           the debug symbols of the two embeddable engines above
 
 Components, at the exact revisions built
   Godot Engine   https://github.com/bahalafoundation/godot  (branch `bahala`;
-                 fork of https://github.com/migeran/godot, carrying arcade's
+  (iOS)          fork of https://github.com/migeran/godot, carrying arcade's
                  fixes as commits — arcade#171)
                  {godot_rev}
+  Godot Engine   https://github.com/bahalafoundation/godot  (branch `vanilla`:
+  (Android)      Godot 4.5.1-stable plus arcade's fixes as commits — arcade#439)
+                 {godot_vanilla_rev}
                  MIT, see godot-LICENSE.txt; third-party components bundled by
                  Godot itself: godot-COPYRIGHT.txt
   GodotJS        https://github.com/bahalafoundation/GodotJS  (branch `bahala`)
@@ -429,25 +455,34 @@ fork of GodotJS. Every component below is MIT-licensed, which permits redistribu
 in binary form but REQUIRES that this notice and the licence texts in licenses/
 travel with the binaries.
 
-It is a HOST EDITOR for developing Arcade's Godot projects on Linux and Windows:
-vanilla Godot plus GodotJS on the QuickJS-NG backend. It is NOT the engine Arcade
-ships (that is the bahalafoundation/godot fork on JavaScriptCore), and it never exports a
-pack that ships.
+It is a HOST EDITOR for developing Arcade's Godot projects: Godot 4.5.1, from the
+same tree as the Android engine Arcade ships, plus GodotJS on the {backend}
+backend. {role}
 
 Components, at the exact revisions built
-  Godot Engine   https://github.com/godotengine/godot
-                 {godot_rev}  (4.5.1-stable)
+  Godot Engine   https://github.com/bahalafoundation/godot  (branch `vanilla`:
+                 Godot 4.5.1-stable plus arcade's fixes as commits)
+                 {godot_rev}
                  MIT, see licenses/godot-LICENSE.txt; third-party components
                  bundled by Godot itself: licenses/godot-COPYRIGHT.txt
   GodotJS        https://github.com/bahalafoundation/GodotJS  (branch `bahala`)
                  {godotjs_rev}
                  MIT, see licenses/godotjs-LICENSE.txt
-  QuickJS-NG     https://github.com/quickjs-ng/quickjs
-                 {quickjs_rev}
-                 MIT, see licenses/quickjs-ng-LICENSE.txt
-
+{engine_component}
 Built by {run_url}
 """
+
+HOST_ROLE = {
+    "jsc": "The backend Arcade's iOS app runs.",
+    "quickjs": "The backend Arcade's Android app runs.",
+}
+
+# The component the backend adds: QuickJS-NG is compiled in; JavaScriptCore is linked as a
+# system framework and nothing of it is redistributed.
+HOST_ENGINE_COMPONENT = {
+    "jsc": "\nJavaScriptCore is linked as a system framework; no part of it is redistributed here.\n",
+    "quickjs": "  QuickJS-NG     https://github.com/quickjs-ng/quickjs\n                 {quickjs_rev}\n                 MIT, see licenses/quickjs-ng-LICENSE.txt\n",
+}
 
 
 def ditto_zip(src: pathlib.Path, zip_path: pathlib.Path) -> None:
@@ -532,8 +567,9 @@ def symbols_command(args: argparse.Namespace) -> None:
 
 
 def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None) -> pathlib.Path:
-    """The macOS editor, then the iOS library for device and Simulator, wrapped as one
-    xcframework without its dSYMs; returns the xcframework."""
+    """The fork's macOS editor, only to dump extension_api.json, then the iOS library for
+    device and Simulator, wrapped as one xcframework without its dSYMs; returns the
+    xcframework."""
     env = dict(os.environ)
     # xcodebuild layers this over every target it builds, the one hook onto the framework
     # wrapper's link line: JavaScriptCore, and an arm64-only Simulator slice (arcade#177),
@@ -548,8 +584,11 @@ def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: 
     )
     env["XCODE_XCCONFIG_FILE"] = str(xcconfig)
 
-    # Metal, not the default Vulkan build, which needs the Vulkan SDK. build_libgodot.sh
-    # then finds this editor and skips its own host build.
+    # The fork's own editor, never published (the macOS editor is the host part's, from the
+    # vanilla tree): build_libgodot.sh dumps extension_api.json from it, which must be the
+    # iOS engine's, since arcade resolves its method binds by these hashes. Metal, not the
+    # default Vulkan build, which needs the Vulkan SDK; build_libgodot.sh finds it under
+    # this name and skips its own host build.
     run([tool("scons"), "p=macos", "target=editor", "dev_build=yes", "vulkan=no", "metal=yes", f"-j{jobs}"], cwd=godot, env=env)
 
     # Without --update-api, which would force the default host rebuild: build_libgodot.sh
@@ -647,18 +686,31 @@ def check_xcframework(xcf: pathlib.Path, symbols_in: pathlib.Path | None) -> lis
     return ids
 
 
+def assert_extension_api(api: pathlib.Path, godot_rev: str) -> None:
+    """The fork's 4.5.1, from its own editor: the version the embedded engine reports."""
+    header = json.loads(api.read_text(encoding="utf-8"))["header"]
+    got = (header.get("version_major"), header.get("version_minor"), header.get("version_patch"), header.get("version_status"))
+    if got != (4, 5, 1, "stable"):
+        fail(f"{api}: header says {got}, expected Godot 4.5.1-stable")
+    print(f"extension_api.json: {header.get('version_full_name')}, from the fork at {godot_rev[:9]}", flush=True)
+
+
 def stage_apple(tree: pathlib.Path, godot: pathlib.Path, xcf: pathlib.Path, stage: pathlib.Path, out: pathlib.Path, symbols_in: pathlib.Path | None) -> list:
+    """The xcframework, and the GDExtension API it is bound by: extension_api.json (arcade's
+    method-bind hashes, so no local engine build is needed to regenerate them),
+    gdextension_interface.h and libgodot.h, published as libgodot-gdextension.zip. Its
+    notice covers the whole release, the .aar included."""
     gdextension = tree / "build" / "gdextension"
     if not (gdextension / "extension_api.json").is_file():
         fail("no extension_api.json: the libgodot build scripts changed layout?")
     rev = godotjs_rev()
     godot_rev = output(["git", "-C", godot, "rev-parse", "HEAD"])
 
-    # What arcade's method-bind hashes and host are generated from, unpublished.
-    sdk = fresh(stage / "gdextension")
+    sdk = fresh(stage / GDEXTENSION)
     shutil.copy2(gdextension / "extension_api.json", sdk)
     shutil.copy2(gdextension / "gdextension_interface.h", sdk)
     shutil.copy2(tree / "libgodot_framework" / "libgodot" / "libgodot.h", sdk)
+    assert_extension_api(sdk / "extension_api.json", godot_rev)
 
     staged_xcf = stage / "libgodot.xcframework"
     if staged_xcf.exists():
@@ -666,26 +718,14 @@ def stage_apple(tree: pathlib.Path, godot: pathlib.Path, xcf: pathlib.Path, stag
     shutil.copytree(xcf, staged_xcf, symlinks=True)
     ids = check_xcframework(staged_xcf, symbols_in)
 
-    editor_dir = fresh(stage / MACOS_EDITOR)
-    editor = editor_dir / "godot-editor"
-    shutil.copy2(godot / "bin" / "godot.macos.editor.dev.arm64", editor)
-    assert_backend(editor, "jsc")
-    assert_godot_version(editor, godot_rev)
-    write_text(editor_dir / STAMP, stamp_json({"rev": LIBGODOT_REV, "godotjs_rev": rev}))
-
-    licenses = editor_dir / "licenses"
-    quickjs_rev = copy_licenses(godot, licenses)
-    notice = LIBGODOT_NOTICE.format(godot_rev=godot_rev, godotjs_rev=rev, quickjs_rev=quickjs_rev, run_url=run_url())
-    write_text(editor_dir / "NOTICE.txt", notice)
-
     out.mkdir(parents=True, exist_ok=True)
+    quickjs_rev = copy_licenses(godot, out)
+    notice = LIBGODOT_NOTICE.format(godot_rev=godot_rev, godot_vanilla_rev=GODOT_VANILLA_REV, godotjs_rev=rev, quickjs_rev=quickjs_rev, run_url=run_url())
     write_text(out / "NOTICE.txt", notice)
-    for f in licenses.iterdir():
-        shutil.copy2(f, out / f.name)
-    for name, src in (("libgodot-xcframework.zip", staged_xcf), (f"{MACOS_EDITOR}.zip", editor_dir)):
+    write_text(sdk / "NOTICE.txt", notice)
+    for name, src in (("libgodot-xcframework.zip", staged_xcf), (f"{GDEXTENSION}.zip", sdk)):
         ditto_zip(src, out / name)
         write_sha256(out / name)
-    shutil.copy2(editor_dir / STAMP, out / f"{MACOS_EDITOR}.stamp.json")
     write_text(out / "xcode-version.txt", output(["xcodebuild", "-version"]) + "\n")
     return ids
 
@@ -710,10 +750,9 @@ def patch_gradle_scons_args(godot: pathlib.Path) -> None:
 def build_android(godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None) -> pathlib.Path:
     """scons builds libgodot_android.so, gradle's generateGodotTemplates packages it into the
     .aar (gradle finds scons on PATH at configure time, though it never runs it); returns
-    the .aar. arm64 only, which Play's 64-bit rule allows. The fork's Android needs
-    angle_libs= (its detect.py has no default) and opengl3=no (its GLES3/EGL backend does
-    not compile; the app runs Vulkan only)."""
-    flags = ["platform=android", "arch=arm64", "target=template_debug", "use_quickjs_ng=yes", "angle_libs=", "opengl3=no"]
+    the .aar. arm64 only, which Play's 64-bit rule allows. From the vanilla tree, with
+    upstream's Android as it is: arcade's Kotlin uses only its stock API (arcade#439)."""
+    flags = ["platform=android", "arch=arm64", "target=template_debug", "use_quickjs_ng=yes"]
     if symbols_in is not None:
         # Adds DWARF and drops the `-s` link flag. Gradle strips the copy it packages
         # (same build id), so the copy saved here is the only one with the DWARF.
@@ -728,8 +767,8 @@ def build_android(godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | Non
 
 
 def stage_android(aar: pathlib.Path, stage: pathlib.Path, out: pathlib.Path, symbols_in: pathlib.Path | None) -> list:
-    """QuickJS-NG and nothing else, the getRenderView lookup and 16 KB pages, on the .so
-    the .aar carries; with symbols, the saved copy matching it by build id."""
+    """QuickJS-NG and nothing else and 16 KB pages, on the .so the .aar carries; with
+    symbols, the saved copy matching it by build id."""
     stage.mkdir(parents=True, exist_ok=True)
     staged = stage / AAR
     shutil.copy2(aar, staged)
@@ -738,7 +777,6 @@ def stage_android(aar: pathlib.Path, stage: pathlib.Path, out: pathlib.Path, sym
         with zipfile.ZipFile(staged) as z:
             so.write_bytes(z.read("jni/arm64-v8a/libgodot_android.so"))
         assert_backend(so, "quickjs")
-        assert_render_view_lookup(so)
         assert_16kb_aligned(so)
         ids = []
         if symbols_in is not None:
@@ -767,14 +805,18 @@ def host_platform() -> str:
         return "linuxbsd"
     if sys.platform == "win32":
         return "windows"
-    fail(f"the host part builds on Linux or Windows, not {sys.platform}")
+    if sys.platform == "darwin":
+        if os.uname().machine != "arm64":
+            fail(f"the macOS editor is arm64 only, not {os.uname().machine}")
+        return "macos"
+    fail(f"the host part builds on Linux, Windows or macOS, not {sys.platform}")
     return ""
 
 
 def build_host(godot: pathlib.Path, platform: str, jobs: int, scons_cache: str | None) -> None:
-    """use_quickjs_ng=yes alone picks the backend: GodotJS reads custom.py's use_jsc only when
-    no QuickJS option is set. The cache does not change what is built. SCons finds MSVC."""
-    flags = [f"platform={platform}", "target=editor", "use_quickjs_ng=yes", f"-j{jobs}"]
+    """The backend is a flag (HOSTS), never custom.py, which the vanilla tree does not have.
+    The cache does not change what is built. SCons finds MSVC and Xcode."""
+    flags = [f"platform={platform}", "target=editor", *HOSTS[platform]["flags"], f"-j{jobs}"]
     if scons_cache:
         flags += [f"cache_path={scons_cache}", "cache_limit=6"]
     run([tool("scons"), *flags], cwd=godot)
@@ -789,14 +831,27 @@ def stage_host(godot: pathlib.Path, platform: str, stage: pathlib.Path, out: pat
         if not src.exists():
             fail(f"{src} was not built; scons' output naming changed?")
         shutil.copy2(src, editor_dir / staged)
-    assert_backend(editor_dir / spec["engine"], "quickjs")
+    backend = spec["backend"]
+    assert_backend(editor_dir / spec["engine"], backend)
+    assert_godot_version(editor_dir / spec["run"], GODOT_VANILLA_REV)
     rev = godotjs_rev()
     stamp = stamp_json({"platform": platform, "godot_vanilla_rev": GODOT_VANILLA_REV, "godotjs_rev": rev})
     write_text(editor_dir / STAMP, stamp)
     quickjs_rev = copy_licenses(godot, editor_dir / "licenses")
+    if backend == "jsc":
+        # Nothing of QuickJS-NG is in this editor (assert_backend), so its licence isn't due.
+        (editor_dir / "licenses" / "quickjs-ng-LICENSE.txt").unlink()
     write_text(
         editor_dir / "NOTICE.txt",
-        HOST_NOTICE.format(host=spec["host"], godot_rev=GODOT_VANILLA_REV, godotjs_rev=rev, quickjs_rev=quickjs_rev, run_url=run_url()),
+        HOST_NOTICE.format(
+            host=spec["host"],
+            backend=BACKEND_NAMES[backend],
+            role=HOST_ROLE[backend],
+            engine_component=HOST_ENGINE_COMPONENT[backend].format(quickjs_rev=quickjs_rev),
+            godot_rev=GODOT_VANILLA_REV,
+            godotjs_rev=rev,
+            run_url=run_url(),
+        ),
     )
 
     # Contents at the zip's root, no wrapping directory: arcade's ci/vendor.nu unpacks it
@@ -817,13 +872,13 @@ def stage_host(godot: pathlib.Path, platform: str, stage: pathlib.Path, out: pat
     write_sha256(zip_path)
     write_text(out / f"{name}.stamp.json", stamp)
     print(f"{zip_path.name}: {zip_path.stat().st_size} bytes", flush=True)
-    print("NOT the engine that ships: vanilla Godot + QuickJS-NG, not the godot fork's JavaScriptCore build.", flush=True)
+    print(f"{name}: the vanilla tree on {BACKEND_NAMES[backend]}. {HOST_ROLE[backend]}", flush=True)
 
 
 def smoke(args: argparse.Namespace) -> None:
     """--version names the pinned Godot, and GodotJS's own integration project (tests/project)
     runs headless to its completion sentinel, as upstream's runtime matrix runs it for
-    host-qjs, exercising the module end to end on QuickJS-NG."""
+    host-qjs and host-jsc, exercising the module end to end on the editor's backend."""
     spec = HOSTS[host_platform()]
     editor = pathlib.Path(args.stage).resolve() / f"godot-editor-{spec['host']}" / spec["run"]
     project = pathlib.Path(args.project).resolve()
@@ -839,8 +894,8 @@ def smoke(args: argparse.Namespace) -> None:
         return log
 
     version = step("version", [editor, "--version"]).strip().splitlines()[-1]
-    if not version.endswith(GODOT_VANILLA_REV[:9]):
-        fail(f"--version printed {version!r}, expected a build of {GODOT_VANILLA_REV[:9]}")
+    if version != f"4.5.1.stable.custom_build.{GODOT_VANILLA_REV[:9]}":
+        fail(f"--version printed {version!r}, expected 4.5.1.stable.custom_build.{GODOT_VANILLA_REV[:9]}")
     # `--outDir .godot/godotjs`: GodotJS loads compiled JS from `.godot/<module directory>`,
     # which here is godotjs, not the GodotJS the project's tsconfig assumes.
     out_dir = ".godot/godotjs"

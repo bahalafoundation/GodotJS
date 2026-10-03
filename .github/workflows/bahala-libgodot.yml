@@ -6,8 +6,8 @@ name: Bahala libgodot
 #   libgodot-xcframework.zip       the iOS engine, GodotJS on JavaScriptCore: the device
 #                                  slice the app ships, and an arm64 Simulator slice
 #                                  (ad-hoc signed) its Simulator UI tests boot (arcade#177)
-#   godot-editor-macos-arm64.zip   the macOS arm64 host editor from the same tree (it
-#                                  exports the packs the engines above/below load)
+#   libgodot-gdextension.zip       the iOS engine's extension_api.json, which arcade's
+#                                  method-bind hashes come from, and its headers
 #   godot-lib-android-aar.zip      the Android engine, GodotJS on QuickJS-NG
 #   libgodot-symbols.zip           both engines' debug symbols, for arcade's crash
 #                                  reporting (arcade#260); not vendored, see below
@@ -28,12 +28,13 @@ name: Bahala libgodot
 # hosted Xcode. They stay out of what arcade vendors: the xcframework carries no dSYMs and
 # no debug map, and the .aar's .so is stripped, so the pinned zips don't grow.
 #
-# Sibling of bahala-host-editors.yml (#169), which publishes the Linux/Windows host editors
-# built from VANILLA Godot. This one builds the bahalafoundation/godot fork at build.py's
-# LIBGODOT_REV, with this fork linked in as godot/modules/godotjs, through libgodot's iOS
-# build scripts in .github/bahala/libgodot/ (arcade#438). GitHub-hosted macOS
-# minutes are free on this public repo, and it needs no credential beyond this workflow's
-# own GITHUB_TOKEN.
+# Two Godots (arcade#439). The apple half builds the bahalafoundation/godot fork at
+# build.py's LIBGODOT_REV, whose LibGodot patches only iOS needs, through libgodot's iOS
+# build scripts in .github/bahala/libgodot/ (arcade#438). The android half builds the
+# vanilla tree at GODOT_VANILLA_REV, the one sibling bahala-host-editors.yml builds all
+# three host editors from, the macOS one that exports the packs included. Both link this
+# fork in as modules/godotjs. GitHub-hosted macOS minutes are free on this public repo,
+# and it needs no credential beyond this workflow's own GITHUB_TOKEN.
 #
 # The runner is `xcode-27`: macOS 27 with Xcode 27.0 (27A266a), exactly what macdaddy runs
 # arcade's app builds with. It is a public-preview label; if it goes away or breaks,
@@ -87,6 +88,7 @@ jobs:
       godotjs_rev: ${{ steps.plan.outputs.godotjs_rev }}
       tag: ${{ steps.plan.outputs.tag }}
       libgodot_rev: ${{ steps.plan.outputs.libgodot_rev }}
+      godot_vanilla_rev: ${{ steps.plan.outputs.godot_vanilla_rev }}
       recipe: ${{ steps.plan.outputs.recipe }}
       symsorter_version: ${{ steps.plan.outputs.symsorter_version }}
       exists: ${{ steps.plan.outputs.exists }}
@@ -98,7 +100,7 @@ jobs:
 
       # The tag names the last commit outside .github/ (so a commit that only touches CI
       # files maps to the same tag, finds the release published, and builds nothing),
-      # LIBGODOT_REV and the recipe version (so one that changes what's built maps to a
+      # both Godot pins and the recipe version (so one that changes what's built maps to a
       # new tag and builds). build.py derives it, as it does for arcade.
       - name: Resolve the module revision and release tag
         id: plan
@@ -130,9 +132,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two halves of one engine build, in parallel, each from its own clone of the same
-        # pinned tree (arcade's local build runs them one after the other in one tree).
-        part: [apple, android]
+        # Two halves, in parallel: the apple part in libgodot/ (the fork in godot/, libgodot's
+        # scripts beside it; its absolute path is in the debug map, so it moves the Mach-O
+        # UUIDs: keep the name), the android part in godot/ (the vanilla tree).
+        include:
+          - part: apple
+            tree: libgodot
+            godot: libgodot/godot
+          - part: android
+            tree: godot
+            godot: godot
     runs-on: ${{ inputs.runner || 'xcode-27' }}
     timeout-minutes: 180
     defaults:
@@ -172,16 +181,14 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       # Before the toolchain: the Android one is read from this tree's config.gradle.
-      # The tree is libgodot/: the godot fork in godot/, libgodot's scripts beside it. Its
-      # absolute path is in the debug map, so it moves the Mach-O UUIDs: keep the name.
-      - name: Engine source (bahalafoundation/godot at build.py's LIBGODOT_REV)
-        run: python3 godotjs/.github/bahala/build.py source --part ${{ matrix.part }} --tree libgodot
+      - name: Engine source (build.py's ${{ matrix.part == 'apple' && 'LIBGODOT_REV' || 'GODOT_VANILLA_REV' }})
+        run: python3 godotjs/.github/bahala/build.py source --part ${{ matrix.part }} --tree ${{ matrix.tree }}
 
       - name: "Android: SDK platform, build-tools and NDK (from config.gradle)"
         if: matrix.part == 'android'
         run: |
           set -euo pipefail
-          cfg=libgodot/godot/platform/android/java/app/config.gradle
+          cfg=${{ matrix.godot }}/platform/android/java/app/config.gradle
           field() { grep -E "^\s*$1\s*:" "$cfg" | head -1 | cut -d: -f2- | tr -d " ,'"; }
           sdk=$(field compileSdk); bt=$(field buildTools); ndk=$(field ndkVersion)
           echo "config.gradle: compileSdk $sdk, buildTools $bt, NDK $ndk"
@@ -198,7 +205,7 @@ jobs:
       - name: Build, check and package (${{ matrix.part }})
         env:
           GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process
-        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree libgodot --stage stage --out dist --symbols symbols
+        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree ${{ matrix.tree }} --stage stage --out dist --symbols symbols
 
       - uses: actions/upload-artifact@v7
         with:
@@ -259,6 +266,7 @@ jobs:
       TAG: ${{ needs.plan.outputs.tag }}
       GODOTJS_REV: ${{ needs.plan.outputs.godotjs_rev }}
       LIBGODOT_REV: ${{ needs.plan.outputs.libgodot_rev }}
+      GODOT_VANILLA_REV: ${{ needs.plan.outputs.godot_vanilla_rev }}
       LIBGODOT_RECIPE: ${{ needs.plan.outputs.recipe }}
       SYMSORTER_VERSION: ${{ needs.plan.outputs.symsorter_version }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -279,15 +287,17 @@ jobs:
           base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
           sha() { awk -v f="$1" '$2 == f { print $1 }' SHA256SUMS; }
           {
-            echo "The engine [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) embeds and ships (#170): the bahalafoundation/godot fork + this fork's GodotJS."
+            echo "The engines [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) embeds and ships (#170), with this fork's GodotJS: iOS from the bahalafoundation/godot fork, Android from the vanilla tree its host editors share (#439)."
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| Godot | bahalafoundation/godot@\`$LIBGODOT_REV\` (fork of migeran/godot, Godot 4.5.1, arcade#171), built as libgodot by .github/bahala/libgodot/ (arcade#438) |"
+            echo "| Godot (iOS) | bahalafoundation/godot@\`$LIBGODOT_REV\` (\`bahala\`: fork of migeran/godot, Godot 4.5.1, arcade#171), built as libgodot by .github/bahala/libgodot/ (arcade#438) |"
+            echo "| Godot (Android) | bahalafoundation/godot@\`$GODOT_VANILLA_REV\` (\`vanilla\`: Godot 4.5.1-stable + arcade's fixes, arcade#439), the host editors' tree |"
             echo "| Recipe | $LIBGODOT_RECIPE (the tag's \`-r$LIBGODOT_RECIPE\`; .github/bahala/build.py at this tag, which arcade's \`just engine-build\` runs) |"
             echo "| xcframework | \`ios-arm64\` (device, what ships) + \`ios-arm64-simulator\` (arm64, ad-hoc signed, arcade#177) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
-            echo "| Backends | JavaScriptCore (iOS xcframework, macOS editor); QuickJS-NG (Android .aar) |"
+            echo "| Backends | JavaScriptCore (iOS xcframework); QuickJS-NG (Android .aar) |"
+            echo "| GDExtension | \`libgodot-gdextension.zip\`: the iOS engine's \`extension_api.json\`, \`gdextension_interface.h\`, \`libgodot.h\` |"
             echo "| Symbols | \`libgodot-symbols.zip\`: both engines' DWARF, \`symsorter -z\` $SYMSORTER_VERSION (arcade#261) |"
             echo "| Toolchain | $(head -1 xcode-version.txt) ($(tail -1 xcode-version.txt)), SCons $SCONS_VERSION, node $NODE_VERSION, pnpm $PNPM_VERSION, JDK 17 |"
             echo "| Built by | $RUN_URL |"
@@ -296,13 +306,6 @@ jobs:
             echo
             echo '```'
             cat SHA256SUMS
-            echo '```'
-            echo
-            echo "## Stamp (\`.build-libgodot-pins.json\` inside godot-editor-macos-arm64.zip)"
-            echo
-            echo '```json'
-            cat godot-editor-macos-arm64.stamp.json
-            echo
             echo '```'
             echo
             echo "## Debug symbols"
@@ -323,13 +326,12 @@ jobs:
             echo "    artifact: libgodot-xcframework"
             echo "    sha256: $(sha libgodot-xcframework.zip)"
             echo "    unpack: xcframework"
-            echo "  - name: godot-editor-macos-arm64"
-            echo "    platforms: [editor, ios, android, content]"
-            echo "    host: macos-arm64"
+            echo "  - name: libgodot-gdextension"
+            echo "    platforms: [ios, android]"
             echo "    version: 4.5.1"
             echo "    release: $base"
-            echo "    artifact: godot-editor-macos-arm64"
-            echo "    sha256: $(sha godot-editor-macos-arm64.zip)"
+            echo "    artifact: libgodot-gdextension"
+            echo "    sha256: $(sha libgodot-gdextension.zip)"
             echo "    unpack: directory"
             echo "  - name: libgodot-android"
             echo "    platforms: [android]"
@@ -340,7 +342,7 @@ jobs:
             echo "    unpack: aar"
             echo '```'
             echo
-            echo "Every component is MIT-licensed; NOTICE.txt and the licence texts are attached, and the editor's zip carries them too."
+            echo "Every component is MIT-licensed; NOTICE.txt and the licence texts are attached, and libgodot-gdextension.zip carries NOTICE.txt too."
           } > notes.md
           cat notes.md
 
@@ -357,9 +359,9 @@ jobs:
           cd dist
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Engine: Godot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7} (recipe ${LIBGODOT_RECIPE})" \
+            --title "Engine: Godot ${LIBGODOT_REV:0:7} (iOS) + ${GODOT_VANILLA_REV:0:7} (Android) + GodotJS ${GODOTJS_REV:0:7} (recipe ${LIBGODOT_RECIPE})" \
             --notes-file notes.md \
             --latest=false \
-            libgodot-xcframework.zip godot-editor-macos-arm64.zip godot-lib-android-aar.zip libgodot-symbols.zip \
+            libgodot-xcframework.zip libgodot-gdextension.zip godot-lib-android-aar.zip libgodot-symbols.zip \
             SHA256SUMS NOTICE.txt ./*-LICENSE.txt godot-COPYRIGHT.txt
           echo "::notice::published $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"

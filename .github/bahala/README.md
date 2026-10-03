@@ -25,10 +25,17 @@ GodotJS fork". What follows are the rules for working in this repository.
   `python3 .github/bahala/build.py --help` lists the parts and commands.
   Bumping Godot or the recipe is a commit here and a `vendor.yaml` re-pin in
   Arcade, nothing more.
+- **Two Godots, and only iOS needs the fork (arcade#439).** The iOS
+  xcframework builds from
+  [`bahalafoundation/godot`](https://github.com/bahalafoundation/godot)'s
+  `bahala` (a fork of `migeran/godot`, for its LibGodot patches), at
+  `LIBGODOT_REV`. The Android `.aar` and all three host editors build from
+  one vanilla tree, the same repository's `vanilla` branch (Godot
+  4.5.1-stable plus arcade's fixes), at `GODOT_VANILLA_REV`: the macOS editor
+  that exports the packs and the Android engine that runs them are one Godot.
 - **Arcade's Godot fixes are commits, not patches (arcade#171).** They live
-  on [`bahalafoundation/godot`](https://github.com/bahalafoundation/godot)'s
-  own `bahala` branch (a fork of `migeran/godot`), whose commit
-  `LIBGODOT_REV` pins. Nothing here applies a patch.
+  on those two branches, each fix on whichever tree needs it. Nothing here
+  applies a patch.
 - **libgodot's iOS build kit lives in `libgodot/` (arcade#438):**
   `build_libgodot.sh`, `build_libgodot_xcframework.sh` and the
   `libgodot_framework` Xcode project, copied unchanged from
@@ -41,17 +48,18 @@ GodotJS fork". What follows are the rules for working in this repository.
   the repository's Actions settings, not deleted, so their files stay as
   upstream wrote them. After a sync, check that nothing new came in enabled:
   `gh workflow list -R bahalafoundation/GodotJS --all`.
-  - `bahala-host-editors.yml` publishes the Linux and Windows host editors
-    (vanilla Godot + GodotJS on QuickJS-NG) as
+  - `bahala-host-editors.yml` publishes the host editors from the vanilla
+    tree, macOS on JavaScriptCore and Linux and Windows on QuickJS-NG, as
     `editor-godot-<7>-godotjs-<7>-r<recipe>` (build.py's `host` part).
-  - `bahala-libgodot.yml` publishes the engine Arcade ships (the
-    bahalafoundation/godot fork + GodotJS): the iOS xcframework (device and arm64
-    Simulator slices) and macOS editor on JavaScriptCore, and the Android
-    `.aar` on QuickJS-NG, as `libgodot-<7>-godotjs-<7>-r<recipe>` (build.py's
-    `apple` and `android` parts), with both
-    engines' debug symbols as `libgodot-symbols.zip` (arcade#261). It runs on
-    the hosted `xcode-27` runner; if that preview label breaks, dispatch it
-    with `runner=macos-26`.
+  - `bahala-libgodot.yml` publishes the engines Arcade ships: the iOS
+    xcframework (device and arm64 Simulator slices) on JavaScriptCore with its
+    `extension_api.json`, and the Android `.aar` on QuickJS-NG, as
+    `libgodot-<fork 7>-godot-<vanilla 7>-godotjs-<7>-r<recipe>` (build.py's
+    `apple` and `android` parts), with both engines' debug symbols as
+    `libgodot-symbols.zip` (arcade#261).
+  - Both run their macOS jobs on the hosted `xcode-27` runner; if that preview
+    label breaks, dispatch with `runner=macos-26` (`macos_runner=` for the
+    host editors).
 - **Releases are never overwritten.** Both workflows name a release after the
   last commit outside `.github/`, and build nothing if it already exists. The
   tag itself points at the commit the run built (identical outside
