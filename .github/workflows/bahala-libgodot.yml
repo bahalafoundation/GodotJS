@@ -29,8 +29,9 @@ name: Bahala libgodot
 # no debug map, and the .aar's .so is stripped, so the pinned zips don't grow.
 #
 # Sibling of bahala-host-editors.yml (#169), which publishes the Linux/Windows host editors
-# built from VANILLA Godot. This one builds the bahalafoundation/libgodot fork at build.py's
-# LIBGODOT_REV, with this fork linked in as godot/modules/godotjs. GitHub-hosted macOS
+# built from VANILLA Godot. This one builds the bahalafoundation/godot fork at build.py's
+# LIBGODOT_REV, with this fork linked in as godot/modules/godotjs, through libgodot's iOS
+# build scripts in .github/bahala/libgodot/ (arcade#438). GitHub-hosted macOS
 # minutes are free on this public repo, and it needs no credential beyond this workflow's
 # own GITHUB_TOKEN.
 #
@@ -72,7 +73,7 @@ permissions:
 env:
   # Toolchain. node/python/scons match arcade's mise.lock; pnpm is this repo's own
   # `packageManager`. Java 17 and the Android SDK come from the runner image; the NDK,
-  # platform and build-tools versions are read from the libgodot tree's config.gradle.
+  # platform and build-tools versions are read from the godot fork's config.gradle.
   NODE_VERSION: 22.23.2
   PNPM_VERSION: 10.11.0
   SCONS_VERSION: 4.11.1
@@ -171,7 +172,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       # Before the toolchain: the Android one is read from this tree's config.gradle.
-      - name: Engine source (bahalafoundation/libgodot at build.py's LIBGODOT_REV)
+      # The tree is libgodot/: the godot fork in godot/, libgodot's scripts beside it. Its
+      # absolute path is in the debug map, so it moves the Mach-O UUIDs: keep the name.
+      - name: Engine source (bahalafoundation/godot at build.py's LIBGODOT_REV)
         run: python3 godotjs/.github/bahala/build.py source --part ${{ matrix.part }} --tree libgodot
 
       - name: "Android: SDK platform, build-tools and NDK (from config.gradle)"
@@ -276,11 +279,11 @@ jobs:
           base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
           sha() { awk -v f="$1" '$2 == f { print $1 }' SHA256SUMS; }
           {
-            echo "The engine [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) embeds and ships (#170): the bahalafoundation/libgodot fork + this fork's GodotJS."
+            echo "The engine [bahalafoundation/arcade](https://github.com/bahalafoundation/arcade) embeds and ships (#170): the bahalafoundation/godot fork + this fork's GodotJS."
             echo
             echo "| | |"
             echo "|---|---|"
-            echo "| libgodot | bahalafoundation/libgodot@\`$LIBGODOT_REV\` (fork of migeran/libgodot; Godot 4.5.1 from bahalafoundation/godot, arcade#171) |"
+            echo "| Godot | bahalafoundation/godot@\`$LIBGODOT_REV\` (fork of migeran/godot, Godot 4.5.1, arcade#171), built as libgodot by .github/bahala/libgodot/ (arcade#438) |"
             echo "| Recipe | $LIBGODOT_RECIPE (the tag's \`-r$LIBGODOT_RECIPE\`; .github/bahala/build.py at this tag, which arcade's \`just engine-build\` runs) |"
             echo "| xcframework | \`ios-arm64\` (device, what ships) + \`ios-arm64-simulator\` (arm64, ad-hoc signed, arcade#177) |"
             echo "| GodotJS | \`$GODOTJS_REV\` (the last module commit; built from \`$GITHUB_SHA\`, identical outside .github/) |"
@@ -354,7 +357,7 @@ jobs:
           cd dist
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Engine: libgodot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7} (recipe ${LIBGODOT_RECIPE})" \
+            --title "Engine: Godot ${LIBGODOT_REV:0:7} + GodotJS ${GODOTJS_REV:0:7} (recipe ${LIBGODOT_RECIPE})" \
             --notes-file notes.md \
             --latest=false \
             libgodot-xcframework.zip godot-editor-macos-arm64.zip godot-lib-android-aar.zip libgodot-symbols.zip \

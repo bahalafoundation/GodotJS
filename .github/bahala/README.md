@@ -23,14 +23,18 @@ GodotJS fork". What follows are the rules for working in this repository.
   engine-build` runs it from the commit a release's tag points at, so Arcade
   pins a release (tag and SHA-256) and knows nothing else about the build.
   `python3 .github/bahala/build.py --help` lists the parts and commands.
-  Bumping Godot, libgodot or the recipe is a commit here and a `vendor.yaml`
-  re-pin in Arcade, nothing more.
+  Bumping Godot or the recipe is a commit here and a `vendor.yaml` re-pin in
+  Arcade, nothing more.
 - **Arcade's Godot fixes are commits, not patches (arcade#171).** They live
   on [`bahalafoundation/godot`](https://github.com/bahalafoundation/godot)'s
-  own `bahala` branch (a fork of `migeran/godot`), reached through
-  [`bahalafoundation/libgodot`](https://github.com/bahalafoundation/libgodot)'s
-  (a fork of `migeran/libgodot`) `godot` gitlink, which `LIBGODOT_REV` pins.
-  Nothing here applies a patch.
+  own `bahala` branch (a fork of `migeran/godot`), whose commit
+  `LIBGODOT_REV` pins. Nothing here applies a patch.
+- **libgodot's iOS build kit lives in `libgodot/` (arcade#438):**
+  `build_libgodot.sh`, `build_libgodot_xcframework.sh` and the
+  `libgodot_framework` Xcode project, copied unchanged from
+  `migeran/libgodot` (by way of the retired `bahalafoundation/libgodot` at
+  `01a14a0`). `build.py` copies them into the engine tree beside `godot/`,
+  where they look. Arcade uses none of libgodot's submodules.
 - **Sync upstream by merging** `upstream/main` into `bahala`, never by
   rebasing. Mirror upstream's `main` to this fork's `main` unchanged.
 - **Only our two workflows run here.** Upstream's workflows are disabled in
@@ -41,7 +45,7 @@ GodotJS fork". What follows are the rules for working in this repository.
     (vanilla Godot + GodotJS on QuickJS-NG) as
     `editor-godot-<7>-godotjs-<7>-r<recipe>` (build.py's `host` part).
   - `bahala-libgodot.yml` publishes the engine Arcade ships (the
-    bahalafoundation/libgodot fork + GodotJS): the iOS xcframework (device and arm64
+    bahalafoundation/godot fork + GodotJS): the iOS xcframework (device and arm64
     Simulator slices) and macOS editor on JavaScriptCore, and the Android
     `.aar` on QuickJS-NG, as `libgodot-<7>-godotjs-<7>-r<recipe>` (build.py's
     `apple` and `android` parts), with both
