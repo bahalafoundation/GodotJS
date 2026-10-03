@@ -579,9 +579,11 @@ def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: 
         before = binary.stat().st_size
         run(["strip", "-S", binary])
         print(f"{slice_id}/libgodot: {before} bytes, {binary.stat().st_size} without its debug map", flush=True)
-    rewrapped = tree / "build" / "libgodot.xcframework.rewrap"
+    # xcodebuild insists the output be named *.xcframework.
+    rewrapped = tree / "build" / "rewrap" / "libgodot.xcframework"
     if rewrapped.exists():
         shutil.rmtree(rewrapped)
+    rewrapped.parent.mkdir(parents=True, exist_ok=True)
     run(["xcodebuild", "-create-xcframework", "-framework", xcf / "ios-arm64" / "libgodot.framework", "-framework", sim, "-output", rewrapped])
     shutil.rmtree(xcf)
     shutil.move(str(rewrapped), str(xcf))
