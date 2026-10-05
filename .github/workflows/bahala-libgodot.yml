@@ -144,6 +144,8 @@ jobs:
             godot: godot
     runs-on: ${{ inputs.runner || 'xcode-27' }}
     timeout-minutes: 180
+    env:
+      SCONS_CACHE: ${{ github.workspace }}/.scons-cache
     defaults:
       run:
         shell: bash
@@ -202,10 +204,49 @@ jobs:
           "$sdkmanager" --install platform-tools "platforms;android-$sdk" "build-tools;$bt" "ndk;$ndk" > /dev/null
           ls "$ANDROID_HOME/ndk"
 
+      # The SCons cache (arcade#478), as bahala-host-editors.yml keeps one: a warm build
+      # recompiles only what changed, a cold one (no cache, or a new Godot pin) still works.
+      # SCons keys an object by its sources and command line, not by the compiler, so the
+      # apple part's key carries the Xcode build: a hosted-image update starts a fresh
+      # cache, never reuses objects an older compiler made. The android compiler is the NDK
+      # config.gradle names, whose path is in every command line.
+      - name: SCons cache key
+        id: cache
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.part }}" = apple ]; then
+            xcode=$(xcodebuild -version | sed -n 's/^Build version //p')
+            test -n "$xcode"
+            echo "key=scons-apple-$xcode-${{ needs.plan.outputs.libgodot_rev }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "key=scons-android-${{ needs.plan.outputs.godot_vanilla_rev }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore the SCons cache
+        id: restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: ${{ steps.cache.outputs.key }}-${{ github.sha }}
+          restore-keys: |
+            ${{ steps.cache.outputs.key }}-
+
       - name: Build, check and package (${{ matrix.part }})
+        id: build
         env:
           GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process
-        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree ${{ matrix.tree }} --stage stage --out dist --symbols symbols
+        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree ${{ matrix.tree }} --stage stage --out dist --symbols symbols --scons-cache "$SCONS_CACHE"
+
+      # Saved even when the build fails part-way: the objects that did compile still save
+      # the next attempt their time. Not when the exact key was restored: that cache is
+      # already saved, and a key can't be overwritten.
+      - name: Save the SCons cache
+        if: ${{ !cancelled() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') && steps.restore.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: ${{ steps.cache.outputs.key }}-${{ github.sha }}
 
       - uses: actions/upload-artifact@v7
         with:
