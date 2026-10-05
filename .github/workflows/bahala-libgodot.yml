@@ -47,7 +47,8 @@ name: Bahala libgodot
 # commits produces different bytes (the xcframework is not reproducible bit-for-bit), so
 # re-uploading would break every checkout pinned to the old ones. A release is named for
 # what it was built from: the two commits and build.py's LIBGODOT_RECIPE, the version of
-# the recipe. If that release exists, nothing is built. A change to the recipe that
+# the recipe. If that release exists, nothing is built (on `bahala`; a dispatch on another
+# branch publishes nothing, so it builds and checks regardless). A change to the recipe that
 # changes what's built bumps LIBGODOT_RECIPE, and so gets a new release rather than
 # silently mapping onto the old one; a change that doesn't (a comment, the notes) leaves
 # it alone and builds nothing. All four artifacts come from one run or none: a failed
@@ -93,6 +94,7 @@ jobs:
       symsorter_version: ${{ steps.plan.outputs.symsorter_version }}
       exists: ${{ steps.plan.outputs.exists }}
       publish: ${{ steps.plan.outputs.publish }}
+      build: ${{ steps.plan.outputs.build }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -114,21 +116,31 @@ jobs:
           # Only `bahala` publishes. A dispatch on any other branch builds and checks
           # without releasing, which is how to try a change to this workflow.
           if [ "$GITHUB_REF" = "refs/heads/bahala" ]; then publish=true; else publish=false; fi
+          # A release that exists is never rebuilt, but a run that publishes nothing builds
+          # anyway: a commit that only touches CI files (this workflow, build.py's cache)
+          # maps to the release already published, and a dispatch on its branch is the only
+          # way to try it.
+          if [ "$exists" != true ] || [ "$publish" != true ]; then build=true; else build=false; fi
           {
             echo "exists=$exists"
             echo "publish=$publish"
+            echo "build=$build"
           } >> "$GITHUB_OUTPUT"
           cat plan.env
           echo "HEAD is $GITHUB_SHA"
-          echo "Release tag: $tag (exists: $exists, publish: $publish)"
+          echo "Release tag: $tag (exists: $exists, publish: $publish, build: $build)"
           if [ "$exists" = true ]; then
-            echo "::notice::$tag is already published; nothing to build (releases are immutable, see the header)"
+            if [ "$build" = true ]; then
+              echo "::notice::$tag is already published; building anyway, as this run publishes nothing"
+            else
+              echo "::notice::$tag is already published; nothing to build (releases are immutable, see the header)"
+            fi
           fi
 
   build:
     name: Build (${{ matrix.part }})
     needs: plan
-    if: needs.plan.outputs.exists != 'true'
+    if: needs.plan.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -144,6 +156,8 @@ jobs:
             godot: godot
     runs-on: ${{ inputs.runner || 'xcode-27' }}
     timeout-minutes: 180
+    env:
+      SCONS_CACHE: ${{ github.workspace }}/.scons-cache
     defaults:
       run:
         shell: bash
@@ -202,10 +216,59 @@ jobs:
           "$sdkmanager" --install platform-tools "platforms;android-$sdk" "build-tools;$bt" "ndk;$ndk" > /dev/null
           ls "$ANDROID_HOME/ndk"
 
+      # The cache holds every object a second time (the tree's own and the cache's copy),
+      # three trees' worth for the apple part, on a runner whose disk is small: a run with
+      # 8.4 GiB of cache ran out of it (arcade#478). The apple part builds no Android.
+      - name: "Apple: free the Android SDK's disk"
+        if: matrix.part == 'apple'
+        run: |
+          df -h /
+          sudo rm -rf "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "${ANDROID_NDK_ROOT:-}" "$HOME/Library/Android"
+          df -h /
+
+      # The SCons cache (arcade#478), as bahala-host-editors.yml keeps one: a warm build
+      # recompiles only what changed, a cold one (no cache, or a new Godot pin) still works.
+      # SCons keys an object by its sources and command line, not by the compiler, so the
+      # apple part's key carries the Xcode build: a hosted-image update starts a fresh
+      # cache, never reuses objects an older compiler made. The android compiler is the NDK
+      # config.gradle names, whose path is in every command line.
+      - name: SCons cache key
+        id: cache
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.part }}" = apple ]; then
+            xcode=$(xcodebuild -version | sed -n 's/^Build version //p')
+            test -n "$xcode"
+            echo "key=scons-apple-$xcode-${{ needs.plan.outputs.libgodot_rev }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "key=scons-android-${{ needs.plan.outputs.godot_vanilla_rev }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore the SCons cache
+        id: restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: ${{ steps.cache.outputs.key }}-${{ github.sha }}
+          restore-keys: |
+            ${{ steps.cache.outputs.key }}-
+
       - name: Build, check and package (${{ matrix.part }})
+        id: build
         env:
           GRADLE_OPTS: -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process
-        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree ${{ matrix.tree }} --stage stage --out dist --symbols symbols
+        run: python3 godotjs/.github/bahala/build.py build --part ${{ matrix.part }} --tree ${{ matrix.tree }} --stage stage --out dist --symbols symbols --scons-cache "$SCONS_CACHE"
+
+      # Saved even when the build fails part-way: the objects that did compile still save
+      # the next attempt their time. Not when the exact key was restored: that cache is
+      # already saved, and a key can't be overwritten.
+      - name: Save the SCons cache
+        if: ${{ !cancelled() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') && steps.restore.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: ${{ steps.cache.outputs.key }}-${{ github.sha }}
 
       - uses: actions/upload-artifact@v7
         with:
@@ -229,7 +292,7 @@ jobs:
   symbols:
     name: Package the debug symbols
     needs: [plan, build]
-    if: needs.plan.outputs.exists != 'true'
+    if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

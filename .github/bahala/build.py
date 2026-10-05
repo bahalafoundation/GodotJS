@@ -50,6 +50,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 # bahalafoundation/godot's `bahala` (a fork of migeran/godot, carrying arcade's fixes as
@@ -100,6 +101,12 @@ XCFRAMEWORK_SLICES = ["ios-arm64", "ios-arm64-simulator"]
 STAMP = ".build-libgodot-pins.json"
 GDEXTENSION = "libgodot-gdextension"
 AAR = "godot-lib.template_debug.aar"
+
+# `cache_limit` (GiB) of the SCons cache each part keeps, which GitHub's 10 GB-per-repo
+# cache holds with the host editors' (bahala-host-editors.yml) and every branch's own.
+# The apple part's is three trees' objects (the fork's macOS editor, iOS device, iOS
+# Simulator), the android part's one. SCons prunes the oldest objects past it.
+SCONS_CACHE_LIMIT = {"apple": 12, "android": 3, "host": 6}
 
 # Built binary under godot/bin -> staged name. Windows' console wrapper launches the
 # executable named like itself minus `.console`, so it is staged under the matching name.
@@ -566,7 +573,28 @@ def symbols_command(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------- apple ---
 
 
-def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None) -> pathlib.Path:
+def scons_cache_flags(part: str, scons_cache: str | None) -> list:
+    """The cache does not change what is built: SCons reuses an object only when its
+    sources, flags and compiler match, debug symbols included."""
+    return [f"cache_path={scons_cache}", f"cache_limit={SCONS_CACHE_LIMIT[part]}"] if scons_cache else []
+
+
+PHASES: list = []
+
+
+def report_cache(label: str, scons_cache: str | None, started: float) -> None:
+    """One line per build phase: how long it took and how big the cache is after it. A
+    cache past its cache_limit is pruned oldest first, so one that sits at its limit
+    rebuilds what it dropped: the sizes show whether the limit fits."""
+    size = sum(f.stat().st_size for f in pathlib.Path(scons_cache).rglob("*") if f.is_file()) if scons_cache else 0
+    note = f", SCons cache {size / 2**30:.2f} GiB" if scons_cache else ""
+    note += f", disk free {shutil.disk_usage(pathlib.Path.cwd()).free / 2**30:.1f} GiB"
+    line = f"{label}: {(time.monotonic() - started) / 60:.1f} min{note}"
+    PHASES.append(line)
+    print(f"==> {line}", flush=True)
+
+
+def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None, scons_cache: str | None) -> pathlib.Path:
     """The fork's macOS editor, only to dump extension_api.json, then the iOS library for
     device and Simulator, wrapped as one xcframework without its dSYMs; returns the
     xcframework."""
@@ -584,12 +612,22 @@ def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: 
     )
     env["XCODE_XCCONFIG_FILE"] = str(xcconfig)
 
+    # SCONSFLAGS is the only way flags reach build_libgodot.sh's scons calls: it passes none
+    # through, and SConstruct reads these from the command line only. The cache goes in
+    # before the editor build below, so all three trees share it.
+    def add_sconsflags(*flags: str) -> None:
+        env["SCONSFLAGS"] = " ".join(filter(None, [env.get("SCONSFLAGS"), *flags]))
+
+    add_sconsflags(*scons_cache_flags("apple", scons_cache))
+
     # The fork's own editor, never published (the macOS editor is the host part's, from the
     # vanilla tree): build_libgodot.sh dumps extension_api.json from it, which must be the
     # iOS engine's, since arcade resolves its method binds by these hashes. Metal, not the
     # default Vulkan build, which needs the Vulkan SDK; build_libgodot.sh finds it under
     # this name and skips its own host build.
+    t = time.monotonic()
     run([tool("scons"), "p=macos", "target=editor", "dev_build=yes", "vulkan=no", "metal=yes", f"-j{jobs}"], cwd=godot, env=env)
+    report_cache("macOS editor (scons)", scons_cache, t)
 
     # Without --update-api, which would force the default host rebuild: build_libgodot.sh
     # dumps extension_api.json from the editor above instead. Apple's tools first on PATH:
@@ -597,11 +635,14 @@ def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: 
     # library, which build_libgodot_xcframework.sh wraps as ios-arm64-simulator.
     env["PATH"] = os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin", env.get("PATH", "")])
     if symbols_in is not None:
-        # SCONSFLAGS is the only way in: build_libgodot.sh passes no flags through, and
-        # SConstruct reads debug_symbols from the command line only.
-        env["SCONSFLAGS"] = " ".join(filter(None, [env.get("SCONSFLAGS"), "debug_symbols=yes"]))
+        # Not on the editor above: it is never shipped, and its objects stay as they were.
+        add_sconsflags("debug_symbols=yes")
+    t = time.monotonic()
     run([tree / "build_libgodot.sh", "--target", "ios"], cwd=tree, env=env)
+    report_cache("iOS device (scons, xcodebuild)", scons_cache, t)
+    t = time.monotonic()
     run([tree / "build_libgodot.sh", "--target", "ios", "--simulator"], cwd=tree, env=env)
+    report_cache("iOS Simulator (scons, xcodebuild)", scons_cache, t)
     run([tree / "build_libgodot_xcframework.sh", "--target", "template_debug"], cwd=tree, env=env)
 
     xcf = tree / "build" / "libgodot" / "debug" / "libgodot.xcframework"
@@ -747,7 +788,7 @@ def patch_gradle_scons_args(godot: pathlib.Path) -> None:
     write_text(path, text.replace(anchor, '"arch=${selectedAbi}", "use_quickjs_ng=yes", "-j"'))
 
 
-def build_android(godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None) -> pathlib.Path:
+def build_android(godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None, scons_cache: str | None) -> pathlib.Path:
     """scons builds libgodot_android.so, gradle's generateGodotTemplates packages it into the
     .aar (gradle finds scons on PATH at configure time, though it never runs it); returns
     the .aar. arm64 only, which Play's 64-bit rule allows. From the vanilla tree, with
@@ -757,7 +798,10 @@ def build_android(godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | Non
         # Adds DWARF and drops the `-s` link flag. Gradle strips the copy it packages
         # (same build id), so the copy saved here is the only one with the DWARF.
         flags.append("debug_symbols=yes")
+    flags += scons_cache_flags("android", scons_cache)
+    t = time.monotonic()
     run([tool("scons"), *flags, f"-j{jobs}"], cwd=godot)
+    report_cache("Android (scons)", scons_cache, t)
     if symbols_in is not None:
         (symbols_in / "android").mkdir(parents=True, exist_ok=True)
         shutil.copy2(godot / "platform" / "android" / "java" / "lib" / "libs" / "debug" / "arm64-v8a" / "libgodot_android.so", symbols_in / "android")
@@ -817,8 +861,7 @@ def build_host(godot: pathlib.Path, platform: str, jobs: int, scons_cache: str |
     """The backend is a flag (HOSTS), never custom.py, which the vanilla tree does not have.
     The cache does not change what is built. SCons finds MSVC and Xcode."""
     flags = [f"platform={platform}", "target=editor", *HOSTS[platform]["flags"], f"-j{jobs}"]
-    if scons_cache:
-        flags += [f"cache_path={scons_cache}", "cache_limit=6"]
+    flags += scons_cache_flags("host", scons_cache)
     run([tool("scons"), *flags], cwd=godot)
 
 
@@ -931,10 +974,10 @@ def build(args: argparse.Namespace) -> None:
 
     godot = source(part, tree)
     if part == "apple":
-        xcf = build_apple(tree, godot, jobs, symbols_in)
+        xcf = build_apple(tree, godot, jobs, symbols_in, args.scons_cache)
         ids = stage_apple(tree, godot, xcf, stage, out, symbols_in)
     elif part == "android":
-        aar = build_android(godot, jobs, symbols_in)
+        aar = build_android(godot, jobs, symbols_in, args.scons_cache)
         ids = stage_android(aar, stage, out, symbols_in)
     else:
         platform = host_platform()
@@ -943,6 +986,8 @@ def build(args: argparse.Namespace) -> None:
         ids = []
     if symbols is not None:
         sort_symbols(part, symbols_in, ids, symbols)
+    for line in PHASES:
+        print(f"  {line}", flush=True)
     print(f"{part}: staged under {stage}, release files under {out}:", flush=True)
     for f in sorted(out.iterdir()):
         print(f"  {f.stat().st_size:>12}  {f.name}", flush=True)
@@ -969,7 +1014,7 @@ def main() -> None:
     p.add_argument("--out", required=True, help="the release files of this part")
     p.add_argument("--symbols", help="build with debug_symbols=yes and sort the DWARF here")
     p.add_argument("--jobs", type=int, help="scons -j (default: every CPU)")
-    p.add_argument("--scons-cache", help="a SCons cache directory (host part)")
+    p.add_argument("--scons-cache", help="a SCons cache directory (every part)")
     p.set_defaults(func=build)
 
     p = sub.add_parser("smoke")
