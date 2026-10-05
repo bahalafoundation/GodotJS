@@ -50,6 +50,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 # bahalafoundation/godot's `bahala` (a fork of migeran/godot, carrying arcade's fixes as
@@ -105,7 +106,7 @@ AAR = "godot-lib.template_debug.aar"
 # cache holds with the host editors' (bahala-host-editors.yml) and every branch's own.
 # The apple part's is three trees' objects (the fork's macOS editor, iOS device, iOS
 # Simulator), the android part's one. SCons prunes the oldest objects past it.
-SCONS_CACHE_LIMIT = {"apple": 5, "android": 3, "host": 6}
+SCONS_CACHE_LIMIT = {"apple": 12, "android": 3, "host": 6}
 
 # Built binary under godot/bin -> staged name. Windows' console wrapper launches the
 # executable named like itself minus `.console`, so it is staged under the matching name.
@@ -578,6 +579,20 @@ def scons_cache_flags(part: str, scons_cache: str | None) -> list:
     return [f"cache_path={scons_cache}", f"cache_limit={SCONS_CACHE_LIMIT[part]}"] if scons_cache else []
 
 
+PHASES: list = []
+
+
+def report_cache(label: str, scons_cache: str | None, started: float) -> None:
+    """One line per build phase: how long it took and how big the cache is after it. A
+    cache past its cache_limit is pruned oldest first, so one that sits at its limit
+    rebuilds what it dropped: the sizes show whether the limit fits."""
+    size = sum(f.stat().st_size for f in pathlib.Path(scons_cache).rglob("*") if f.is_file()) if scons_cache else 0
+    note = f", SCons cache {size / 2**30:.2f} GiB" if scons_cache else ""
+    line = f"{label}: {(time.monotonic() - started) / 60:.1f} min{note}"
+    PHASES.append(line)
+    print(f"==> {line}", flush=True)
+
+
 def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | None, scons_cache: str | None) -> pathlib.Path:
     """The fork's macOS editor, only to dump extension_api.json, then the iOS library for
     device and Simulator, wrapped as one xcframework without its dSYMs; returns the
@@ -609,7 +624,9 @@ def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: 
     # iOS engine's, since arcade resolves its method binds by these hashes. Metal, not the
     # default Vulkan build, which needs the Vulkan SDK; build_libgodot.sh finds it under
     # this name and skips its own host build.
+    t = time.monotonic()
     run([tool("scons"), "p=macos", "target=editor", "dev_build=yes", "vulkan=no", "metal=yes", f"-j{jobs}"], cwd=godot, env=env)
+    report_cache("macOS editor (scons)", scons_cache, t)
 
     # Without --update-api, which would force the default host rebuild: build_libgodot.sh
     # dumps extension_api.json from the editor above instead. Apple's tools first on PATH:
@@ -619,8 +636,12 @@ def build_apple(tree: pathlib.Path, godot: pathlib.Path, jobs: int, symbols_in: 
     if symbols_in is not None:
         # Not on the editor above: it is never shipped, and its objects stay as they were.
         add_sconsflags("debug_symbols=yes")
+    t = time.monotonic()
     run([tree / "build_libgodot.sh", "--target", "ios"], cwd=tree, env=env)
+    report_cache("iOS device (scons, xcodebuild)", scons_cache, t)
+    t = time.monotonic()
     run([tree / "build_libgodot.sh", "--target", "ios", "--simulator"], cwd=tree, env=env)
+    report_cache("iOS Simulator (scons, xcodebuild)", scons_cache, t)
     run([tree / "build_libgodot_xcframework.sh", "--target", "template_debug"], cwd=tree, env=env)
 
     xcf = tree / "build" / "libgodot" / "debug" / "libgodot.xcframework"
@@ -777,7 +798,9 @@ def build_android(godot: pathlib.Path, jobs: int, symbols_in: pathlib.Path | Non
         # (same build id), so the copy saved here is the only one with the DWARF.
         flags.append("debug_symbols=yes")
     flags += scons_cache_flags("android", scons_cache)
+    t = time.monotonic()
     run([tool("scons"), *flags, f"-j{jobs}"], cwd=godot)
+    report_cache("Android (scons)", scons_cache, t)
     if symbols_in is not None:
         (symbols_in / "android").mkdir(parents=True, exist_ok=True)
         shutil.copy2(godot / "platform" / "android" / "java" / "lib" / "libs" / "debug" / "arm64-v8a" / "libgodot_android.so", symbols_in / "android")
@@ -962,6 +985,8 @@ def build(args: argparse.Namespace) -> None:
         ids = []
     if symbols is not None:
         sort_symbols(part, symbols_in, ids, symbols)
+    for line in PHASES:
+        print(f"  {line}", flush=True)
     print(f"{part}: staged under {stage}, release files under {out}:", flush=True)
     for f in sorted(out.iterdir()):
         print(f"  {f.stat().st_size:>12}  {f.name}", flush=True)
