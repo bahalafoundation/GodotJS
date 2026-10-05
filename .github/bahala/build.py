@@ -588,6 +588,7 @@ def report_cache(label: str, scons_cache: str | None, started: float) -> None:
     rebuilds what it dropped: the sizes show whether the limit fits."""
     size = sum(f.stat().st_size for f in pathlib.Path(scons_cache).rglob("*") if f.is_file()) if scons_cache else 0
     note = f", SCons cache {size / 2**30:.2f} GiB" if scons_cache else ""
+    note += f", disk free {shutil.disk_usage(pathlib.Path.cwd()).free / 2**30:.1f} GiB"
     line = f"{label}: {(time.monotonic() - started) / 60:.1f} min{note}"
     PHASES.append(line)
     print(f"==> {line}", flush=True)

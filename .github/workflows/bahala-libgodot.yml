@@ -216,6 +216,16 @@ jobs:
           "$sdkmanager" --install platform-tools "platforms;android-$sdk" "build-tools;$bt" "ndk;$ndk" > /dev/null
           ls "$ANDROID_HOME/ndk"
 
+      # The cache holds every object a second time (the tree's own and the cache's copy),
+      # three trees' worth for the apple part, on a runner whose disk is small: a run with
+      # 8.4 GiB of cache ran out of it (arcade#478). The apple part builds no Android.
+      - name: "Apple: free the Android SDK's disk"
+        if: matrix.part == 'apple'
+        run: |
+          df -h /
+          sudo rm -rf "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "${ANDROID_NDK_ROOT:-}" "$HOME/Library/Android"
+          df -h /
+
       # The SCons cache (arcade#478), as bahala-host-editors.yml keeps one: a warm build
       # recompiles only what changed, a cold one (no cache, or a new Godot pin) still works.
       # SCons keys an object by its sources and command line, not by the compiler, so the
